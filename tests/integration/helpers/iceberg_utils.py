@@ -44,7 +44,7 @@ def get_spark():
         )
         .master("local")
     )
-    return builder.getOrCreate()
+    return builder.master("local").getOrCreate()
 
 
 @pytest.fixture(scope="module")

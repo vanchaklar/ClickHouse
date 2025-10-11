@@ -81,8 +81,8 @@ def started_cluster_iceberg():
             user_configs=["configs/users.d/users.xml"],
             with_minio=True,
             stay_alive=True,
-            mem_limit='14g',
-            cpu_limit='10',
+            mem_limit='15g',
+            cpu_limit='40',
         )
 
         logging.info("Starting cluster...")
