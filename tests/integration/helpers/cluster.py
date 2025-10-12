@@ -4088,7 +4088,7 @@ class ClickHouseInstance:
         if cpu_limit is not None:
             self.cpu_limit = f"cpus : {cpu_limit}"
         else:
-            self.cpu_limit = "cpus : 8"
+            self.cpu_limit = "cpus : 6"
 
         self.base_config_dir = (
             p.abspath(p.join(base_path, base_config_dir)) if base_config_dir else None
