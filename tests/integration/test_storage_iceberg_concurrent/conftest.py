@@ -82,7 +82,7 @@ def started_cluster_iceberg():
             with_minio=True,
             stay_alive=True,
             mem_limit='15g',
-            cpu_limit='16',
+            cpu_limit=False,
         )
 
         logging.info("Starting cluster...")
