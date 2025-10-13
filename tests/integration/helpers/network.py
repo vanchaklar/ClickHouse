@@ -1,10 +1,6 @@
 import ipaddress
 import logging
-import os
-import subprocess
 import time
-
-import docker
 
 
 class PartitionManager:
@@ -36,7 +32,8 @@ class PartitionManager:
             # allowing us to use shell built-ins like 'command -v'.
             instance.exec_in_container(['sh', '-c', f'command -v {command}'], user='root')
 
-        # 1. Check if iptables exists
+        # TODO: move it to docker images and remove
+        # Check if iptables exists
         try:
             check_command_exists('iptables')
             logging.info(f"iptables is already available in {instance.name}.")
@@ -46,7 +43,7 @@ class PartitionManager:
             logging.info(e)
             logging.info(f"iptables not found in {instance.name}. Attempting to install...")
 
-        # 2. Check for apt-get and install if found
+        # Check for apt-get and install if found
         try:
             check_command_exists('apt-get')
             logging.info(f"Found apt-get in {instance.name}. Installing iptables...")
@@ -59,7 +56,7 @@ class PartitionManager:
             logging.info(e)
             logging.info(f"apt-get not found or failed in {instance.name}. Trying yum...")
 
-        # 3. Check for yum and install if found
+        # Check for yum and install if found
         try:
             check_command_exists('yum')
             logging.info(f"Found yum in {instance.name}. Installing iptables...")
@@ -70,7 +67,7 @@ class PartitionManager:
         except Exception as e:
             logging.error(f"Yum command failed in {instance.name}: {e}")
 
-        # 4. If all attempts fail, raise an error
+        # If all attempts fail, raise an error
         raise Exception(
             f"Could not find a known package manager (apt-get or yum) in {instance.name} to install iptables.")
 
