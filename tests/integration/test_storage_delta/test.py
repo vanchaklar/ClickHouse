@@ -76,7 +76,7 @@ def get_spark():
             "spark.sql.catalog.spark_catalog",
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
-        .config("spark.sql.catalog.spark_catalog.warehouse", "/var/lib/clickhouse/user_files")
+        .config("spark.sql.catalog.spark_catalog.warehouse", "/var/lib/clickhouse/user_files/test_storage_delta")
         .config("spark.driver.memory", "8g")
         .config("spark.executor.memory", "8g")
         .master("local")

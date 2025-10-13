@@ -4085,12 +4085,12 @@ class ClickHouseInstance:
             self.mem_limit = f"mem_limit : {mem_limit}"
         else:
             self.mem_limit = "mem_limit : 10g"
-        if cpu_limit is not None:
-            self.cpu_limit = f"cpus : {cpu_limit}"
-        elif cpu_limit is False:
+        if cpu_limit is None:
+            self.cpu_limit = "cpus : 6"
+        elif self.cpu_limit == False:
             self.cpu_limit = ""
         else:
-            self.cpu_limit = "cpus : 6"
+            self.cpu_limit = f"cpus : {cpu_limit}"
 
         self.base_config_dir = (
             p.abspath(p.join(base_path, base_config_dir)) if base_config_dir else None
