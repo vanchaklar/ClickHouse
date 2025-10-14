@@ -45,7 +45,7 @@ def started_cluster_iceberg_with_spark():
         filesystem_cache_name = f"cache_{random.randint(10000, 99999)}"
         cluster.filesystem_cache_name = filesystem_cache_name
         filesystem_cache_config_path = p.abspath(
-            p.join( p.dirname(cluster.base_path), 'configs/config.d/{filesystem_cache_name}.xml'))
+            p.join( p.dirname(cluster.base_path), f'configs/config.d/{filesystem_cache_name}.xml'))
         logging.info(filesystem_cache_config_path)
         with open(filesystem_cache_config_path, "w") as f:
             f.write(f"""
