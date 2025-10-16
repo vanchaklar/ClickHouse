@@ -63,8 +63,6 @@ class Job:
 
         enable_commit_status: bool = False
 
-        enable_gh_auth: bool = False
-
         # If a job Result contains multiple sub-results, and only a specific sub-result should be sent to CIDB, set its name here.
         result_name_for_cidb: str = ""
 
@@ -132,6 +130,11 @@ class Job:
             """
             return copy.deepcopy(self)
 
+        def set_name(self, name):
+            res = copy.deepcopy(self)
+            res.name = name
+            return res
+
         def set_dependency(self, job, reset=False):
             res = copy.deepcopy(self)
             if not (isinstance(job, list) or isinstance(job, tuple)):
@@ -164,6 +167,16 @@ class Job:
                     Utils.raise_with_error(
                         f"Invalid artifact type {type(artifact_name_)} for [{artifact_name_}]"
                     )
+            return res
+
+        def set_runs_on(self, runs_on):
+            res = copy.deepcopy(self)
+            res.runs_on = runs_on
+            return res
+
+        def set_command(self, command):
+            res = copy.deepcopy(self)
+            res.command = command
             return res
 
         def unset_provides(self, artifact_keyword):

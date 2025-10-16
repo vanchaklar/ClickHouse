@@ -72,6 +72,7 @@
 #include <Storages/StorageURL.h>
 #include <Storages/System/StorageSystemFilesystemCache.h>
 #include <base/coverage.h>
+#include <Common/getRandomASCIIString.h>
 #include <Common/ActionLock.h>
 #include <Common/CurrentMetrics.h>
 #include <Common/DNSResolver.h>
@@ -696,6 +697,12 @@ BlockIO InterpreterSystemQuery::execute()
                 asynchronous_metrics->update(std::chrono::system_clock::now(), /*force_update*/ true);
             break;
         }
+        case Type::RECONNECT_ZOOKEEPER:
+        {
+            getContext()->checkAccess(AccessType::SYSTEM_RECONNECT_ZOOKEEPER);
+            system_context->reconnectZooKeeper("triggered via SYSTEM RECONNECT ZOOKEEPER command");
+            break;
+        }
         case Type::STOP_MERGES:
             startStopAction(ActionLocks::PartsMerge, false);
             break;
@@ -872,6 +879,7 @@ BlockIO InterpreterSystemQuery::execute()
             result = Unfreezer(getContext()).systemUnfreeze(query.backup_name);
             break;
         }
+#if USE_LIBFIU
         case Type::ENABLE_FAILPOINT:
         {
             getContext()->checkAccess(AccessType::SYSTEM_FAILPOINT);
@@ -892,6 +900,12 @@ BlockIO InterpreterSystemQuery::execute()
             LOG_TRACE(log, "Finished waiting for failpoint {}", query.fail_point_name);
             break;
         }
+#else // USE_LIBFIU
+        case Type::ENABLE_FAILPOINT:
+        case Type::DISABLE_FAILPOINT:
+        case Type::WAIT_FAILPOINT:
+            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "The server was compiled without FIU support");
+#endif // USE_LIBFIU
         case Type::RESET_COVERAGE:
         {
             getContext()->checkAccess(AccessType::SYSTEM);
@@ -925,7 +939,7 @@ BlockIO InterpreterSystemQuery::execute()
         case Type::JEMALLOC_FLUSH_PROFILE:
         {
             getContext()->checkAccess(AccessType::SYSTEM_JEMALLOC);
-            auto filename = Jemalloc::flushProfile(query.jemalloc_profile_path.empty() ? "/tmp/jemalloc_clickhouse" : query.jemalloc_profile_path);
+            auto filename = Jemalloc::flushProfile("/tmp/jemalloc_clickhouse");
             auto col = ColumnString::create();
             col->insertData(filename.data(), filename.size());
             Columns columns;
@@ -1094,7 +1108,7 @@ void InterpreterSystemQuery::restartReplicas(ContextMutablePtr system_context)
 
     for (auto & elem : catalog.getDatabases())
     {
-        if (!elem.second->canContainMergeTreeTables())
+        if (elem.second->isExternal())
             continue;
 
         if (!access_is_granted_globally && !show_tables_is_granted_globally && !access->isGranted(AccessType::SHOW_TABLES, elem.first))
@@ -1889,6 +1903,11 @@ AccessRightsElements InterpreterSystemQuery::getRequiredAccessForDDLOnCluster() 
         case Type::RELOAD_ASYNCHRONOUS_METRICS:
         {
             required_access.emplace_back(AccessType::SYSTEM_RELOAD_ASYNCHRONOUS_METRICS);
+            break;
+        }
+        case Type::RECONNECT_ZOOKEEPER:
+        {
+            required_access.emplace_back(AccessType::SYSTEM_RECONNECT_ZOOKEEPER);
             break;
         }
         case Type::STOP_MERGES:
