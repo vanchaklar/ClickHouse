@@ -100,6 +100,8 @@
     M(TextIndexReadDictionaryBlocks, "Number of times a dictionary block has been read from the text index.", ValueType::Number) \
     M(TextIndexDictionaryBlockCacheHits, "Number of times a dictionary block has been found in the cache.", ValueType::Number) \
     M(TextIndexDictionaryBlockCacheMisses, "Number of times a dictionary block has not been found in the cache.", ValueType::Number) \
+    M(TextIndexPostingListCacheHits, "Number of times a dictionary block has been found in the cache.", ValueType::Number) \
+    M(TextIndexPostingListCacheMisses, "Number of times a dictionary block has not been found in the cache.", ValueType::Number) \
     M(TextIndexReadSparseIndexBlocks, "Number of times a sparse index block has been read from the text index.", ValueType::Number) \
     M(TextIndexReaderTotalMicroseconds, "Total time spent reading the text index.", ValueType::Microseconds) \
     M(TextIndexReadGranulesMicroseconds, "Total time spent reading and analyzing granules of the text index.", ValueType::Microseconds) \

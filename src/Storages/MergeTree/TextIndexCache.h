@@ -10,12 +10,16 @@ namespace ProfileEvents
 {
     extern const Event TextIndexDictionaryBlockCacheHits;
     extern const Event TextIndexDictionaryBlockCacheMisses;
+    extern const Event TextIndexPostingListCacheHits;
+    extern const Event TextIndexPostingListCacheMisses;
 }
 
 namespace CurrentMetrics
 {
     extern const Metric TextIndexDictionaryBlockCacheBytes;
     extern const Metric TextIndexDictionaryBlockCacheCells;
+    extern const Metric TextIndexPostingListCacheBytes;
+    extern const Metric TextIndexPostingListCacheCells;
 }
 
 namespace DB
@@ -45,8 +49,6 @@ private:
     absl::flat_hash_map<String, TokenPostingsInfo> token_infos;
 };
 
-using TextIndexDictionaryBlockCacheEntryPtr = std::shared_ptr<TextIndexDictionaryBlockCacheEntry>;
-
 class TextIndexDictionaryBlockCache : public CacheBase<UInt128, TextIndexDictionaryBlockCacheEntry, UInt128TrivialHash>
 {
 public:
@@ -63,7 +65,7 @@ public:
     }
 
     template <typename LoadFunc>
-    TextIndexDictionaryBlockCacheEntryPtr getOrSet(UInt128 key, LoadFunc && load_func)
+    MappedPtr getOrSet(UInt128 key, LoadFunc && load_func)
     {
         auto [cache_entry, inserted] = CacheBase::getOrSet(key, load_func);
         if (inserted)
@@ -74,6 +76,35 @@ public:
     }
 };
 
+class TextIndexPostingListCache : public CacheBase<UInt128, PostingList, UInt128TrivialHash>
+{
+public:
+    TextIndexPostingListCache(const String & cache_policy, size_t max_size_in_bytes, size_t max_count, double size_ratio)
+        : CacheBase(cache_policy, CurrentMetrics::TextIndexPostingListCacheBytes, CurrentMetrics::TextIndexPostingListCacheCells, max_size_in_bytes, max_count, size_ratio)
+    {}
+
+    template <typename... ARGS>
+    static UInt128 hash(ARGS... args)
+    {
+        SipHash hasher;
+        (hasher.update(args),...);
+        return hasher.get128();
+    }
+
+    template <typename LoadFunc>
+    MappedPtr getOrSet(UInt128 key, LoadFunc && load_func)
+    {
+        auto [cache_entry, inserted] = CacheBase::getOrSet(key, load_func);
+        if (inserted)
+            ProfileEvents::increment(ProfileEvents::TextIndexPostingListCacheMisses);
+        else
+            ProfileEvents::increment(ProfileEvents::TextIndexPostingListCacheHits);
+        return std::move(cache_entry);
+    }
+};
+
+using TextIndexDictionaryBlockCacheEntryPtr = std::shared_ptr<TextIndexDictionaryBlockCacheEntry>;
 using TextIndexDictionaryBlockCachePtr = std::shared_ptr<TextIndexDictionaryBlockCache>;
 
+using TextIndexPostingListCachePtr = std::shared_ptr<TextIndexPostingListCache>;
 }

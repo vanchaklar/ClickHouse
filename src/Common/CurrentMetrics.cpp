@@ -320,6 +320,8 @@
     M(VectorSimilarityIndexCacheCells, "Number of entries in vector similarity index cache") \
     M(TextIndexDictionaryBlockCacheBytes, "Size of the text index dictionary block cache in bytes") \
     M(TextIndexDictionaryBlockCacheCells, "Number of entries in text index dictionary block cache") \
+    M(TextIndexPostingListCacheBytes, "Size of the text index posting lists cache in bytes") \
+    M(TextIndexPostingListCacheCells, "Number of entries in text index posting lists cache") \
     M(DNSHostsCacheBytes, "Size of the DNS hosts cache in bytes") \
     M(DNSHostsCacheSize, "Number of cached DNS hosts") \
     M(DNSAddressesCacheBytes, "Size of the DNS addresses cache in bytes") \

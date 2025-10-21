@@ -3,12 +3,13 @@
 #include <Storages/MergeTree/MergeTreeIndexReader.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexText.h>
+#include <Storages/MergeTree/TextIndexCache.h>
 #include <roaring.hh>
 
 namespace DB
 {
 
-using PostingsMap = absl::flat_hash_map<StringRef, const PostingList *>;
+using PostingsMap = absl::flat_hash_map<StringRef, PostingListPtr>;
 
 /// A part of "direct read from text index" optimization.
 /// This reader fills virtual columns for text search filters
@@ -22,7 +23,8 @@ public:
     MergeTreeReaderTextIndex(
         const IMergeTreeReader * main_reader_,
         MergeTreeIndexWithCondition index_,
-        NamesAndTypesList columns_);
+        NamesAndTypesList columns_,
+        ContextPtr context_ = Context::getGlobalContextInstance());
 
     size_t readRows(
         size_t from_mark,
@@ -42,17 +44,17 @@ private:
     {
         MergeTreeIndexGranulePtr granule;
         PostingsMap postings;
-        std::list<PostingList> postings_holders;
         bool may_be_true = true;
         bool need_read_postings = true;
     };
 
     void updateAllIndexRanges();
     void createEmptyColumns(Columns & columns) const;
-    void readPostingsIfNeeded(Granule & granule);
+    void readPostingsIfNeeded(size_t index_mark, Granule & granule);
     void fillSkippedColumn(IColumn & column, size_t num_rows);
     void fillColumn(IColumn & column, Granule & granule, const String & column_name, size_t granule_offset, size_t num_rows);
 
+    TextIndexPostingListCache * posting_list_cache;
     MergeTreeIndexWithCondition index;
     MarkRanges all_index_ranges;
     std::optional<MergeTreeIndexReader> index_reader;
