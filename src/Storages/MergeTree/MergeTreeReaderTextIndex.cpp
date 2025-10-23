@@ -34,8 +34,8 @@ MergeTreeReaderTextIndex::MergeTreeReaderTextIndex(
         columns_,
         /*virtual_fields=*/ {},
         main_reader_->storage_snapshot,
-        Context::getGlobalContextInstance()->getIndexUncompressedCache().get(),
-        Context::getGlobalContextInstance()->getIndexMarkCache().get(),
+        context_->getIndexUncompressedCache().get(),
+        context_->getIndexMarkCache().get(),
         main_reader_->all_mark_ranges,
         main_reader_->settings)
     , posting_list_cache(context_->getTextIndexPostingListCache().get())
@@ -206,7 +206,7 @@ size_t MergeTreeReaderTextIndex::readRows(
         }
         else
         {
-            readPostingsIfNeeded(index_mark, granule);
+            readPostingsIfNeeded(granule);
 
             const auto & index_granularity = data_part_info_for_read->getIndexGranularity();
             size_t mark_at_index_granule = index_mark * granularity;
@@ -244,7 +244,7 @@ void MergeTreeReaderTextIndex::createEmptyColumns(Columns & columns) const
     }
 }
 
-void MergeTreeReaderTextIndex::readPostingsIfNeeded(size_t index_mark, Granule & granule)
+void MergeTreeReaderTextIndex::readPostingsIfNeeded(Granule & granule)
 {
     if (!granule.need_read_postings)
         return;
@@ -267,7 +267,11 @@ void MergeTreeReaderTextIndex::readPostingsIfNeeded(size_t index_mark, Granule &
         else
         {
             const auto & future_postings = postings.getFuturePostings();
-            auto posting_list_key = TextIndexPostingListCache::hash(future_postings.path_to_data_part, index_mark, token);
+            auto posting_list_key = TextIndexPostingListCache::hash(
+                future_postings.state.path_to_data_part,
+                future_postings.state.index_name,
+                future_postings.state.index_mark,
+                token.toView());
             posting_list = posting_list_cache->getOrSet(
                 posting_list_key,
                 [&]

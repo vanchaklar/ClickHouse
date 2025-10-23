@@ -67,8 +67,8 @@ public:
     template <typename LoadFunc>
     MappedPtr getOrSet(UInt128 key, LoadFunc && load_func)
     {
-        auto [cache_entry, inserted] = CacheBase::getOrSet(key, load_func);
-        if (inserted)
+        auto [cache_entry, cache_miss] = CacheBase::getOrSet(key, load_func);
+        if (cache_miss)
             ProfileEvents::increment(ProfileEvents::TextIndexDictionaryBlockCacheMisses);
         else
             ProfileEvents::increment(ProfileEvents::TextIndexDictionaryBlockCacheHits);
@@ -94,8 +94,8 @@ public:
     template <typename LoadFunc>
     MappedPtr getOrSet(UInt128 key, LoadFunc && load_func)
     {
-        auto [cache_entry, inserted] = CacheBase::getOrSet(key, load_func);
-        if (inserted)
+        auto [cache_entry, cache_miss] = CacheBase::getOrSet(key, load_func);
+        if (cache_miss)
             ProfileEvents::increment(ProfileEvents::TextIndexPostingListCacheMisses);
         else
             ProfileEvents::increment(ProfileEvents::TextIndexPostingListCacheHits);
