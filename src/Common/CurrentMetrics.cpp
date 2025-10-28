@@ -304,6 +304,7 @@
     M(FilesystemCacheDelayedCleanupElements, "Filesystem cache elements in background cleanup queue") \
     M(FilesystemCacheHoldFileSegments, "Filesystem cache file segment which are currently hold as unreleasable") \
     M(FilesystemCacheKeys, "Number of keys in filesystem cache") \
+    M(FilesystemCacheReserveThreads, "Threads number trying to reserve space in cache") \
     M(AsyncInsertCacheSize, "Number of async insert hash id in cache") \
     M(IcebergMetadataFilesCacheBytes, "Size of the iceberg metadata cache in bytes") \
     M(IcebergMetadataFilesCacheFiles, "Number of cached files in the iceberg metadata cache") \
@@ -343,6 +344,8 @@
     M(CompiledExpressionCacheCount, "Total entries in the cache of JIT-compiled code") \
     M(MergeJoinBlocksCacheBytes, "Total bytes used for cached blocks in MergeJoin") \
     M(MergeJoinBlocksCacheCount, "Total cached blocks in MergeJoin") \
+    M(BcryptCacheBytes, "Total size of the bcrypt authentication cache in bytes") \
+    M(BcryptCacheSize, "Total number of entries in the bcrypt authentication cache") \
     M(S3Requests, "S3 requests count") \
     M(KeeperAliveConnections, "Number of alive connections") \
     M(KeeperOutstandingRequests, "Number of outstanding requests") \
