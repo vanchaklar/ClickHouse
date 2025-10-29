@@ -1375,6 +1375,7 @@ use_index_for_in_with_subqueries_max_values	0
 use_join_disjunctions_push_down	0
 use_json_alias_for_old_object_type	0
 use_legacy_to_time	1
+query_result_cache_ignore_log_comment	1
 use_local_cache_for_remote_storage	0
 use_mysql_types_in_show_columns	0
 use_page_cache_for_disks_without_file_cache	0
