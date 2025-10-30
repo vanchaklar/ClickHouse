@@ -223,7 +223,6 @@ class JobConfigs:
         Job.ParamSet(
             parameter=BuildTypes.ARM_COVERAGE,
             provides=[
-                ArtifactNames.DEB_COV,
                 ArtifactNames.CH_COV_BIN,
             ],
             runs_on=RunnerLabels.ARM_LARGE,
@@ -382,6 +381,13 @@ class JobConfigs:
             parameter="amd_asan, flaky check",
             runs_on=RunnerLabels.AMD_SMALL_MEM,
             requires=[ArtifactNames.CH_AMD_ASAN],
+        ),
+    )
+    stateless_tests_targeted_pr_jobs = common_ft_job_config.parametrize(
+        Job.ParamSet(
+            parameter="arm_asan, targeted",
+            runs_on=RunnerLabels.ARM_MEDIUM,
+            requires=[ArtifactNames.CH_ARM_ASAN],
         ),
     )
     bugfix_validation_ft_pr_job = Job.Config(
@@ -741,6 +747,13 @@ class JobConfigs:
                 runs_on=RunnerLabels.AMD_MEDIUM,
                 requires=[ArtifactNames.CH_AMD_ASAN],
             )
+        )
+    )
+    integration_test_targeted_pr_jobs = common_integration_test_job_config.parametrize(
+        Job.ParamSet(
+            parameter=f"amd_asan, targeted",
+            runs_on=RunnerLabels.AMD_MEDIUM,
+            requires=[ArtifactNames.CH_AMD_ASAN],
         )
     )
     compatibility_test_jobs = Job.Config(
