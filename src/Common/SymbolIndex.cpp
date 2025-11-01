@@ -128,9 +128,12 @@ void collectSymbolsFromProgramHeaders(
 
         size_t sym_cnt = 0;
         {
-            for (const auto * it = dyn_begin; it->tag != DynamicTableTag::Null; ++it)
+            for (const auto * it = dyn_begin; ; ++it)
             {
                 __msan_unpoison(it, sizeof(*it));
+
+                if (it->tag == DynamicTableTag::Null)
+                    break;
 
                 if (it->tag != DynamicTableTag::GNU_HASH)
                     continue;
@@ -144,9 +147,8 @@ void collectSymbolsFromProgramHeaders(
 
                 const uint32_t * hash = reinterpret_cast<const uint32_t *>(base_address);
 
-                __msan_unpoison(&hash[0], sizeof(*hash));
-                __msan_unpoison(&hash[1], sizeof(*hash));
-                __msan_unpoison(&hash[2], sizeof(*hash));
+                /// Unpoison the GNU hash table header (at least 3 uint32_t values)
+                __msan_unpoison(hash, 3 * sizeof(uint32_t));
 
                 buckets = hash + 4 + (hash[2] * sizeof(size_t) / 4);
 
@@ -159,7 +161,12 @@ void collectSymbolsFromProgramHeaders(
                 {
                     sym_cnt -= hash[1];
                     hashval = buckets + hash[0] + sym_cnt;
-                    __msan_unpoison(&hashval, sizeof(hashval));
+
+                    /// Unpoison hash values. We don't know the chain length in advance,
+                    /// so unpoison a reasonable maximum (typically chains are short).
+                    /// The actual symbol count will be determined by the low bit.
+                    __msan_unpoison(hashval, 1024 * sizeof(*hashval));
+
                     do
                     {
                         ++sym_cnt;
@@ -510,8 +517,27 @@ void SymbolIndex::load()
     }), data.symbols.end());
 }
 
-const SymbolIndex::Symbol * SymbolIndex::findSymbol(const void * offset) const
+const SymbolIndex::Symbol * SymbolIndex::findSymbol(const void * address) const
 {
+    /// Symbols are stored as file offsets.
+    /// Callers may pass either absolute runtime addresses OR file offsets.
+    /// - Coverage/most stack traces pass absolute addresses
+    /// - system.stack_trace (after PR #82809) already stores file offsets
+    ///
+    /// Strategy: Try to find containing object. If found, input is absolute address → convert.
+    /// If not found, assume input is already a file offset → use directly.
+
+    const Object * object = findObject(address);
+    const void * offset = address;
+
+    if (object)
+    {
+        /// Input is an absolute address, convert to file offset
+        offset = reinterpret_cast<const void *>(
+            reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(object->address_begin));
+    }
+    /// else: input is likely already a file offset, use it directly
+
     return find(offset, data.symbols);
 }
 
