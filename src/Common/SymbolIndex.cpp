@@ -99,6 +99,7 @@ void collectSymbolsFromProgramHeaders(
     /* Iterate over all headers of the current shared lib
      * (first call is for the executable itself)
      */
+    __msan_unpoison(&info->addr, sizeof(info->addr));
     __msan_unpoison(&info->phnum, sizeof(info->phnum));
     __msan_unpoison(&info->phdr, sizeof(info->phdr));
     for (size_t header_index = 0; header_index < info->phnum; ++header_index)
@@ -147,8 +148,8 @@ void collectSymbolsFromProgramHeaders(
 
                 const uint32_t * hash = reinterpret_cast<const uint32_t *>(base_address);
 
-                /// Unpoison the GNU hash table header (at least 3 uint32_t values)
-                __msan_unpoison(hash, 3 * sizeof(uint32_t));
+                /// Unpoison the GNU hash table header (4 uint32_t values: nbuckets, symoffset, bloom_size, maskwords)
+                __msan_unpoison(hash, 4 * sizeof(uint32_t));
 
                 buckets = hash + 4 + (hash[2] * sizeof(size_t) / 4);
 
@@ -162,13 +163,9 @@ void collectSymbolsFromProgramHeaders(
                     sym_cnt -= hash[1];
                     hashval = buckets + hash[0] + sym_cnt;
 
-                    /// Unpoison hash values. We don't know the chain length in advance,
-                    /// so unpoison a reasonable maximum (typically chains are short).
-                    /// The actual symbol count will be determined by the low bit.
-                    __msan_unpoison(hashval, 1024 * sizeof(*hashval));
-
                     do
                     {
+                        __msan_unpoison(hashval, sizeof(*hashval));
                         ++sym_cnt;
                     }
                     while (!(*hashval++ & 1));
@@ -241,6 +238,7 @@ void collectSymbolsFromProgramHeaders(
 #if !defined USE_MUSL
 String getBuildIDFromProgramHeaders(DynamicLinkingProgramHeaderInfo * info)
 {
+    __msan_unpoison(&info->addr, sizeof(info->addr));
     __msan_unpoison(&info->phnum, sizeof(info->phnum));
     __msan_unpoison(&info->phdr, sizeof(info->phdr));
     for (size_t header_index = 0; header_index < info->phnum; ++header_index)

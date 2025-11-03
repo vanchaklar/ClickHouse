@@ -39,7 +39,6 @@ public:
         std::shared_ptr<Elf> elf;
     };
 
-    /// Find symbol by absolute virtual memory address (will be converted to file offset internally).
     const Symbol * findSymbol(const void * address) const;
     const Object * findObject(const void * address) const;
     const Object * thisObject() const;
