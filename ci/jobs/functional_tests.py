@@ -137,6 +137,7 @@ def main():
     is_shared_catalog = False
     is_encrypted_storage = random.choice([True, False])
     is_parallel_replicas = False
+    is_coverage = False
     runner_options = ""
     # optimal value for most of the jobs
     nproc = int(Utils.cpu_count() * 0.6)
@@ -149,7 +150,8 @@ def main():
             print(f"NOTE: Enabled config option [{OPTIONS_TO_INSTALL_ARGUMENTS[to]}]")
             config_installs_args += f" {OPTIONS_TO_INSTALL_ARGUMENTS[to]}"
         elif to.startswith("amd_") or to.startswith("arm_") or "flaky" in to:
-            pass
+            if "coverage" in to:
+                is_coverage = True
         elif to in OPTIONS_TO_TEST_RUNNER_ARGUMENTS:
             print(
                 f"NOTE: Enabled test runner option [{OPTIONS_TO_TEST_RUNNER_ARGUMENTS[to]}]"
@@ -184,6 +186,8 @@ def main():
             nproc = int(Utils.cpu_count() * 1.2)
         elif is_database_replicated:
             nproc = int(Utils.cpu_count() * 0.4)
+        elif is_coverage:
+            nproc = 1
         else:
             pass
 
