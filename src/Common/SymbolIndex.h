@@ -23,7 +23,8 @@ public:
 
     struct Symbol
     {
-        /// Here addresses are relative to objects.
+        /// File offsets (relative to object base), not absolute virtual memory addresses.
+        /// This is consistent with addr2line and improves security (ASLR).
         const void * offset_begin;
         const void * offset_end;
         const char * name;
@@ -38,7 +39,7 @@ public:
         std::shared_ptr<Elf> elf;
     };
 
-    const Symbol * findSymbol(const void * offset) const;
+    const Symbol * findSymbol(const void * address) const;
     const Object * findObject(const void * address) const;
     const Object * thisObject() const;
 
