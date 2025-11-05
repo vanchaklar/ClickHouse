@@ -40,6 +40,8 @@ Checks: [
 
   '-clang-analyzer-core.BitwiseShift', # false positive on boost::dynamic_bitset::to_ulong
 
+  '-clang-analyzer-cplusplus.NewDeleteLeaks', # false positives, slow
+
   '-cppcoreguidelines-*', # impractical in a codebase as large as ClickHouse, also slow
 
   '-darwin-*',
