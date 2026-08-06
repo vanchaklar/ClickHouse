@@ -469,9 +469,21 @@ public:
     /** Register running query. Returns refcounted object, that will remove element from list in destructor.
       * If too many running queries - wait for not more than specified (see settings) amount of time.
       * If timeout is passed - throw an exception.
-      * Don't count KILL QUERY queries or async insert flush queries
+      * Don't count KILL QUERY queries or async insert flush queries.
+      * If force_query_slot is true, acquire a workload query slot even for an internal or
+      * otherwise unlimited query.
+      * A preacquired_query_slot allows a background query to wait asynchronously before entering
+      * ProcessList; ownership is transferred to the resulting QueryStatus.
       */
-    EntryPtr insert(const String & query_, UInt64 normalized_query_hash, const IAST * ast, ContextMutablePtr query_context, UInt64 watch_start_nanoseconds, bool is_internal);
+    EntryPtr insert(
+        const String & query_,
+        UInt64 normalized_query_hash,
+        const IAST * ast,
+        ContextMutablePtr query_context,
+        UInt64 watch_start_nanoseconds,
+        bool is_internal,
+        bool force_query_slot = false,
+        QuerySlotPtr preacquired_query_slot = {});
 
     /// Number of currently executing queries.
     /// WARNING: includes internal queries (e.g. those executed by dictionaries, RMVs, async inserts).
