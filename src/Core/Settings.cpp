@@ -8370,6 +8370,31 @@ Allows creation of tables with the [TimeSeries](/reference/engines/table-engines
 - 0 — the [TimeSeries](/reference/engines/table-engines/integrations/time-series) table engine is disabled.
 - 1 — the [TimeSeries](/reference/engines/table-engines/integrations/time-series) table engine is enabled.
 )", EXPERIMENTAL) \
+    DECLARE(Bool, allow_experimental_queue_table_engine, false, R"(
+Allows creation of tables with the experimental `Queue` table engine.
+)", EXPERIMENTAL) \
+    DECLARE(String, queue_consumer_group, "", R"(
+Selects the consumer group used when reading from an experimental `Queue` table.
+For a materialized view, specify this setting in the view's `SELECT` query.
+An empty value gives each materialized view an independent group.
+)", EXPERIMENTAL) \
+    DECLARE(Bool, queue_commit_on_select, false, R"(
+Whether a successful direct `SELECT` from an experimental `Queue` table acknowledges queue rows selected by the query.
+Rows excluded by a `WHERE` filter remain pending. Acknowledgements are written only to the selected consumer group's state.
+Committing queries with joins, `DISTINCT`, or `LIMIT` are rejected until their message identity can be tracked safely.
+)", EXPERIMENTAL) \
+    DECLARE(UInt64, queue_max_batch_size, 0, R"(
+Maximum number of post-filter result rows returned and acknowledged by a direct committing `SELECT` from an experimental `Queue` table.
+Filtered-out rows do not consume the batch quota. A value of `0` uses the table engine's `max_batch_size`.
+)", EXPERIMENTAL) \
+    DECLARE(String, queue_consumer_offset, "earliest", R"(
+Initial offset for a new experimental `Queue` consumer group.
+Supported values are `earliest` and `latest`.
+)", EXPERIMENTAL) \
+    DECLARE(Bool, queue_reset_consumer_offset, false, R"(
+Recreates the selected experimental `Queue` consumer group's pending-message table at
+`queue_consumer_offset`. The setting requires `queue_consumer_group`.
+)", EXPERIMENTAL) \
     DECLARE(UInt64, unique_key_max_encoded_size, 256, R"(
 Maximum size (in bytes) of the order-preserving binary encoding of a single `UNIQUE KEY` row.
 )", EXPERIMENTAL) \
