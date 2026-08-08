@@ -600,7 +600,7 @@ ALWAYS_INLINE void addExpressionStep(
 
 void addStoragePostFilterSteps(QueryPlan & query_plan, const PlannerContextPtr & planner_context)
 {
-    for (const auto & [table_expression, _] : planner_context->getTableExpressionNodeToData())
+    for (const auto & [table_expression, table_expression_data] : planner_context->getTableExpressionNodeToData())
     {
         StoragePtr storage;
         if (auto * table_node = table_expression->as<TableNode>())
@@ -609,7 +609,15 @@ void addStoragePostFilterSteps(QueryPlan & query_plan, const PlannerContextPtr &
             storage = table_function_node->getStorage();
 
         if (storage)
-            storage->addPostFilterStep(query_plan, planner_context->getQueryContext());
+        {
+            NameToNameMap column_identifiers;
+            for (const auto & column : storage->getPostFilterRequiredColumns(planner_context->getQueryContext()))
+            {
+                if (const auto * identifier = table_expression_data.getColumnIdentifierOrNull(column.name))
+                    column_identifiers.emplace(column.name, *identifier);
+            }
+            storage->addPostFilterStep(query_plan, planner_context->getQueryContext(), column_identifiers);
+        }
     }
 }
 

@@ -5,9 +5,13 @@
 #include <DataTypes/DataTypeUUID.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Common/Exception.h>
+#include <Common/CurrentThread.h>
+#include <Common/QueryScope.h>
 #include <Common/SipHash.h>
 #include <Common/assert_cast.h>
 #include <Common/logger_useful.h>
+#include <Common/quoteString.h>
+#include <Core/BackgroundSchedulePool.h>
 #include <Core/Defines.h>
 #include <Core/Settings.h>
 #include <Databases/IDatabase.h>
@@ -36,10 +40,11 @@
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <Processors/Sinks/SinkToStorage.h>
-#include <Processors/Transforms/ISimpleTransform.h>
+#include <Processors/ISimpleTransform.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/StorageMaterializedView.h>
+#include <Storages/SelectQueryInfo.h>
 #include <Storages/StreamingStorageRegistry.h>
 #include <Storages/checkAndGetLiteralArgument.h>
 
@@ -54,6 +59,8 @@
 namespace DB
 {
 
+void registerStorageQueue(StorageFactory & factory);
+
 namespace Setting
 {
     extern const SettingsBool allow_experimental_queue_table_engine;
@@ -62,6 +69,7 @@ namespace Setting
     extern const SettingsString queue_consumer_group;
     extern const SettingsUInt64 queue_max_batch_size;
     extern const SettingsBool queue_reset_consumer_offset;
+    extern const SettingsSeconds lock_acquire_timeout;
 }
 
 namespace ErrorCodes
@@ -82,6 +90,15 @@ namespace
     constexpr UInt64 DEFAULT_RETENTION_SECONDS = 7 * 24 * 60 * 60;
     constexpr UInt64 DEFAULT_MAX_BATCH_SIZE = 65536;
     constexpr UInt64 DEFAULT_POLLING_INTERVAL_MS = 100;
+
+    Names getAcknowledgementColumnNames()
+    {
+        return {
+            String(ID_COLUMN),
+            String(VERSION_COLUMN),
+            String(IS_DELETED_COLUMN),
+            String(CREATED_AT_COLUMN)};
+    }
 
     bool startsAtLatest(const String & offset)
     {
@@ -150,19 +167,32 @@ namespace
         return insert;
     }
 
-    Block makeAcknowledgementBlock(const Block & block)
+    Block makeAcknowledgementBlock(const Block & block, const Names & column_names)
     {
+        chassert(column_names.size() == 4);
+
+        const auto & id_column = block.getByName(column_names[0]);
+        const auto & version_column = block.getByName(column_names[1]);
+        const auto & is_deleted_column = block.getByName(column_names[2]);
+        const auto & created_at_column = block.getByName(column_names[3]);
+
         Block acknowledgement;
-        acknowledgement.insert(block.getByName(String(ID_COLUMN)));
+        acknowledgement.insert(ColumnWithTypeAndName{
+            id_column.column,
+            id_column.type,
+            String(ID_COLUMN)});
         acknowledgement.insert(ColumnWithTypeAndName{
             ColumnUInt64::create(block.rows(), 2),
-            block.getByName(String(VERSION_COLUMN)).type,
+            version_column.type,
             String(VERSION_COLUMN)});
         acknowledgement.insert(ColumnWithTypeAndName{
-            ColumnUInt8::create(block.rows(), 1),
-            block.getByName(String(IS_DELETED_COLUMN)).type,
+            ColumnUInt8::create(block.rows(), UInt8{1}),
+            is_deleted_column.type,
             String(IS_DELETED_COLUMN)});
-        acknowledgement.insert(block.getByName(String(CREATED_AT_COLUMN)));
+        acknowledgement.insert(ColumnWithTypeAndName{
+            created_at_column.column,
+            created_at_column.type,
+            String(CREATED_AT_COLUMN)});
         return acknowledgement;
     }
 
@@ -192,12 +222,12 @@ namespace
         Blocks acknowledgement_blocks;
     };
 
-    Block removeAcknowledgementColumns(Block header)
+    Block removeAcknowledgementColumns(Block header, const Names & column_names)
     {
-        for (const auto column_name : {ID_COLUMN, VERSION_COLUMN, IS_DELETED_COLUMN, CREATED_AT_COLUMN})
+        for (const auto & column_name : column_names)
         {
-            if (header.has(String(column_name)))
-                header.erase(String(column_name));
+            if (header.has(column_name))
+                header.erase(column_name);
         }
         return header;
     }
@@ -205,10 +235,17 @@ namespace
     class QueueAcknowledgementTransform final : public ISimpleTransform
     {
     public:
-        QueueAcknowledgementTransform(SharedHeader input_header_, std::shared_ptr<QueueReadState> state_)
-            : ISimpleTransform(input_header_, std::make_shared<const Block>(removeAcknowledgementColumns(*input_header_)), false)
+        QueueAcknowledgementTransform(
+            SharedHeader input_header_,
+            std::shared_ptr<QueueReadState> state_,
+            Names column_names_)
+            : ISimpleTransform(
+                input_header_,
+                std::make_shared<const Block>(removeAcknowledgementColumns(*input_header_, column_names_)),
+                false)
             , input_header(std::move(input_header_))
             , state(std::move(state_))
+            , column_names(std::move(column_names_))
         {
         }
 
@@ -219,7 +256,7 @@ namespace
         {
             const size_t rows = chunk.getNumRows();
             Block block = input_header->cloneWithColumns(chunk.detachColumns());
-            state->addAcknowledgementBlock(makeAcknowledgementBlock(block));
+            state->addAcknowledgementBlock(makeAcknowledgementBlock(block, column_names));
 
             Columns output_columns;
             const auto & output_header = getOutputPort().getHeader();
@@ -231,17 +268,22 @@ namespace
 
         SharedHeader input_header;
         std::shared_ptr<QueueReadState> state;
+        Names column_names;
     };
 
     class QueueAcknowledgementStep final : public ITransformingStep
     {
     public:
-        QueueAcknowledgementStep(SharedHeader input_header_, std::shared_ptr<QueueReadState> state_)
+        QueueAcknowledgementStep(
+            SharedHeader input_header_,
+            std::shared_ptr<QueueReadState> state_,
+            Names column_names_)
             : ITransformingStep(
                 input_header_,
-                std::make_shared<const Block>(removeAcknowledgementColumns(*input_header_)),
+                std::make_shared<const Block>(removeAcknowledgementColumns(*input_header_, column_names_)),
                 getTraits())
             , state(std::move(state_))
+            , column_names(std::move(column_names_))
         {
         }
 
@@ -250,9 +292,9 @@ namespace
         void transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &) override
         {
             pipeline.addSimpleTransform(
-                [state = state](const SharedHeader & header)
+                [state_ = state, column_names_ = column_names](const SharedHeader & header)
                 {
-                    return std::make_shared<QueueAcknowledgementTransform>(header, state);
+                    return std::make_shared<QueueAcknowledgementTransform>(header, state_, column_names_);
                 });
         }
 
@@ -272,10 +314,11 @@ namespace
 
         void updateOutputHeader() override
         {
-            output_header = std::make_shared<const Block>(removeAcknowledgementColumns(*input_headers.front()));
+            output_header = std::make_shared<const Block>(removeAcknowledgementColumns(*input_headers.front(), column_names));
         }
 
         std::shared_ptr<QueueReadState> state;
+        Names column_names;
     };
 
     class QueueSource final : public ISource, WithContext
@@ -372,6 +415,7 @@ namespace
                 ID_COLUMN);
 
             auto select_context = Context::createCopy(getContext());
+            select_context->setCurrentQueryId("");
             select_io.emplace(executeQuery(select_query, select_context, QueryFlags{.internal = true}).second);
             reader = std::make_unique<PullingPipelineExecutor>(select_io->pipeline);
         }
@@ -749,6 +793,10 @@ StorageID StorageQueue::ensureConsumerGroup(
     std::unique_lock lock(consumer_groups_mutex);
     auto internal_context = Context::createCopy(getContext());
     internal_context->makeQueryContext();
+    internal_context->setCurrentQueryId("");
+    QueryScope query_scope;
+    if (!CurrentThread::getGroup())
+        query_scope = QueryScope::create(internal_context);
 
     const StorageID consumer_table_id{
         getStorageID().getDatabaseName(),
@@ -800,6 +848,10 @@ StorageID StorageQueue::resetConsumerGroup(
     std::unique_lock lock(consumer_groups_mutex);
     auto internal_context = Context::createCopy(getContext());
     internal_context->makeQueryContext();
+    internal_context->setCurrentQueryId("");
+    QueryScope query_scope;
+    if (!CurrentThread::getGroup())
+        query_scope = QueryScope::create(internal_context);
 
     const StorageID consumer_table_id{
         getStorageID().getDatabaseName(),
@@ -960,7 +1012,8 @@ struct StorageQueue::ViewAcknowledgementState
         if (acknowledgement_rows)
         {
             acknowledgement_blocks.emplace_back(makeAcknowledgementBlock(
-                filterBlock(block, acknowledgement_filter, acknowledgement_rows)));
+                filterBlock(block, acknowledgement_filter, acknowledgement_rows),
+                getAcknowledgementColumnNames()));
         }
 
         if (output_rows != rows)
@@ -1034,6 +1087,10 @@ bool StorageQueue::streamToViews(
 
     auto queue_context = Context::createCopy(getContext());
     queue_context->makeQueryContext();
+    queue_context->setCurrentQueryId("");
+    QueryScope query_scope;
+    if (!CurrentThread::getGroup())
+        query_scope = QueryScope::create(queue_context);
     queue_context->setSetting("queue_consumer_group", consumer_group);
 
     auto view_state = std::make_shared<ViewAcknowledgementState>(max_batch_size);
@@ -1047,7 +1104,8 @@ bool StorageQueue::streamToViews(
             view_acknowledgement_state.reset();
     });
 
-    Names view_input_columns = getInMemoryMetadataPtr(queue_context, false)->getSampleBlock().getNames();
+    auto metadata = getInMemoryMetadataPtr(queue_context, false);
+    Names view_input_columns = metadata->getSampleBlock().getNames();
     view_input_columns.emplace_back(ID_COLUMN);
     view_input_columns.emplace_back(VERSION_COLUMN);
     view_input_columns.emplace_back(IS_DELETED_COLUMN);
@@ -1186,9 +1244,25 @@ void StorageQueue::acknowledge(
 }
 
 
-void StorageQueue::addPostFilterStep(QueryPlan & query_plan, ContextPtr query_context)
+NamesAndTypes StorageQueue::getPostFilterRequiredColumns(ContextPtr query_context) const
 {
-    std::function<void(QueryPlan &)> callback;
+    if (!query_context->getSettingsRef()[Setting::queue_commit_on_select])
+        return {};
+
+    return {
+        {String(ID_COLUMN), std::make_shared<DataTypeUUID>()},
+        {String(VERSION_COLUMN), std::make_shared<DataTypeUInt64>()},
+        {String(IS_DELETED_COLUMN), std::make_shared<DataTypeUInt8>()},
+        {String(CREATED_AT_COLUMN), std::make_shared<DataTypeDateTime64>(6)}};
+}
+
+
+void StorageQueue::addPostFilterStep(
+    QueryPlan & query_plan,
+    ContextPtr query_context,
+    const NameToNameMap & column_identifiers)
+{
+    std::function<void(QueryPlan &, const NameToNameMap &)> callback;
     {
         std::lock_guard lock(post_filter_steps_mutex);
         auto it = post_filter_steps.find(query_context->getCurrentQueryId());
@@ -1197,7 +1271,7 @@ void StorageQueue::addPostFilterStep(QueryPlan & query_plan, ContextPtr query_co
         callback = std::move(it->second);
         post_filter_steps.erase(it);
     }
-    callback(query_plan);
+    callback(query_plan, column_identifiers);
 }
 
 
@@ -1284,17 +1358,25 @@ void StorageQueue::read(
             std::lock_guard lock(post_filter_steps_mutex);
             const auto [_, inserted] = post_filter_steps.emplace(
                 local_context->getCurrentQueryId(),
-                [state, batch_size](QueryPlan & plan)
+                [state, batch_size](QueryPlan & plan, const NameToNameMap & column_identifiers)
                 {
+                    auto acknowledgement_column_names = getAcknowledgementColumnNames();
+                    for (auto & column_name : acknowledgement_column_names)
+                    {
+                        if (auto it = column_identifiers.find(column_name); it != column_identifiers.end())
+                            column_name = it->second;
+                    }
+
                     plan.addStep(std::make_unique<LimitStep>(plan.getCurrentHeader(), batch_size, 0));
-                    plan.addStep(std::make_unique<QueueAcknowledgementStep>(plan.getCurrentHeader(), state));
+                    plan.addStep(std::make_unique<QueueAcknowledgementStep>(
+                        plan.getCurrentHeader(), state, std::move(acknowledgement_column_names)));
                 });
             if (!inserted)
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "A post-filter Queue step is already registered for this query");
         }
 
-        local_context->addSuccessfulQueryCallback(
-            [storage, state, consumer_table_id = *consumer_table_id]
+        local_context->getQueryContext()->addSuccessfulQueryCallback(
+            [storage, state, consumer_id = *consumer_table_id]
             {
                 auto acknowledgement_blocks = state->takeAcknowledgementBlocks();
                 if (acknowledgement_blocks.empty())
@@ -1302,7 +1384,7 @@ void StorageQueue::read(
 
                 auto acknowledge_context = Context::createCopy(storage->getContext());
                 acknowledge_context->makeQueryContext();
-                storage->acknowledge(consumer_table_id, acknowledgement_blocks, acknowledge_context);
+                storage->acknowledge(consumer_id, acknowledgement_blocks, acknowledge_context);
             });
 
         query_info.optimize_trivial_count = false;

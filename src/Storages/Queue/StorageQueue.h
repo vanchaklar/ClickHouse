@@ -53,7 +53,11 @@ public:
         size_t max_block_size,
         size_t num_streams) override;
 
-    void addPostFilterStep(QueryPlan & query_plan, ContextPtr query_context) override;
+    NamesAndTypes getPostFilterRequiredColumns(ContextPtr query_context) const override;
+    void addPostFilterStep(
+        QueryPlan & query_plan,
+        ContextPtr query_context,
+        const NameToNameMap & column_identifiers) override;
 
     SinkToStoragePtr write(
         const ASTPtr & query,
@@ -118,7 +122,7 @@ private:
     mutable std::shared_mutex consumer_groups_mutex;
 
     std::mutex post_filter_steps_mutex;
-    std::unordered_map<String, std::function<void(QueryPlan &)>> post_filter_steps;
+    std::unordered_map<String, std::function<void(QueryPlan &, const NameToNameMap &)>> post_filter_steps;
 
     mutable std::mutex view_acknowledgement_mutex;
     std::shared_ptr<ViewAcknowledgementState> view_acknowledgement_state;

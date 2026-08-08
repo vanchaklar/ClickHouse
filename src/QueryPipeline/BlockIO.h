@@ -3,6 +3,7 @@
 #include <functional>
 #include <Common/QueryScope.h>
 #include <Common/VectorWithMemoryTracking.h>
+#include <Interpreters/QueryMetadataCache.h>
 #include <QueryPipeline/QueryPipeline.h>
 #include <IO/Progress.h>
 #include <Processors/IProcessor.h>
@@ -36,6 +37,10 @@ struct BlockIO
     /// Needed for internal queries.
     /// Each level calls executeQuery and adds its process list entry.
     VectorWithMemoryTracking<std::shared_ptr<ProcessListEntry>> process_list_entries;
+
+    /// Query-scoped cache for storage metadata and snapshots.
+    /// `Context` holds only a weak reference, so `BlockIO` keeps the cache alive for the query lifetime.
+    QueryMetadataCachePtr query_metadata_cache;
 
     QueryPipeline pipeline;
 

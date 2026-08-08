@@ -2018,6 +2018,9 @@ static BlockIO executeQueryImpl(
         /// Hold element of process list till end of query execution.
         res.process_list_entries.push_back(process_list_entry);
 
+        /// Hold the query metadata cache until the end of query execution.
+        res.query_metadata_cache = std::move(query_metadata_cache);
+
         if (query_plan)
         {
             auto plan = QueryPlan::makeSets(std::move(*query_plan), context);

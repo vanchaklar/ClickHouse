@@ -696,6 +696,20 @@ void prepareBuildQueryPlanForTableExpression(const QueryTreeNodePtr & table_expr
             "Limit for number of columns to read exceeded. Requested: {}, maximum: {}",
             columns_names.size(),
             settings[Setting::max_columns_to_read].value);
+
+    if (!select_query_options.only_analyze && (table_node || table_function_node))
+    {
+        const auto & storage = table_node ? table_node->getStorage() : table_function_node->getStorage();
+        auto & global_planner_context = planner_context->getGlobalPlannerContext();
+        for (const auto & column : storage->getPostFilterRequiredColumns(query_context))
+        {
+            if (table_expression_data.hasColumn(column.name))
+                continue;
+
+            const auto & column_identifier = global_planner_context->createColumnIdentifierOrGet(column, table_expression);
+            table_expression_data.addColumn(column, column_identifier, /* is_selected_column */ false);
+        }
+    }
 }
 
 void updatePrewhereOutputsIfNeeded(SelectQueryInfo & table_expression_query_info,

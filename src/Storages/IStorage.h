@@ -440,9 +440,14 @@ public:
         size_t /*max_block_size*/,
         size_t /*num_streams*/);
 
+    /// Columns that must remain available until the storage's post-filter step.
+    /// They are storage-internal columns, so they are not part of access checks or `max_columns_to_read`.
+    virtual NamesAndTypes getPostFilterRequiredColumns(ContextPtr) const { return {}; }
+
     /// Gives a storage a chance to observe rows after WHERE has been applied.
+    /// `column_identifiers` maps storage column names to analyzer plan identifiers.
     /// The default implementation does nothing.
-    virtual void addPostFilterStep(QueryPlan &, ContextPtr) {}
+    virtual void addPostFilterStep(QueryPlan &, ContextPtr, const NameToNameMap &) {}
 
     /** Writes the data to a table.
       * Receives a description of the query, which can contain information about the data write method.
