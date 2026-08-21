@@ -58,7 +58,6 @@ FROM
 (
     SELECT exponentialTimeDecayingFloat64(10)(v, toFloat64(0)) AS value
     FROM VALUES('v Float64', (-1), (2), (0), (-2), (1))
-    GROUP BY v
 )
 ORDER BY value;
 
