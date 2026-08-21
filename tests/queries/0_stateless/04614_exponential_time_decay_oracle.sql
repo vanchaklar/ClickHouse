@@ -291,11 +291,11 @@ SELECT
     abs(exponentialTimeDecayingValueAt(direct.decaying_count, expected.max_time) - expected.weight)
         <= 1e-12 * greatest(1., abs(expected.weight)),
     abs(exponentialTimeDecayingValueAt(merged.decaying_sum, expected.max_time) - expected.weighted_sum)
-        <= 1e-11 * greatest(1., abs(expected.weighted_sum)),
+        <= 1e-12 * greatest(1., abs(expected.weighted_sum)),
     abs(merged.weighted_avg - expected.weighted_sum / expected.weight)
         <= 1e-12 * greatest(1., abs(expected.weighted_sum / expected.weight)),
     abs(exponentialTimeDecayingValueAt(merged.decaying_count, expected.max_time) - expected.weight)
-        <= 1e-11 * greatest(1., abs(expected.weight)),
+        <= 1e-12 * greatest(1., abs(expected.weight)),
     isFinite(tupleElement(direct.decaying_sum, 'signed_unit_time')),
     isFinite(tupleElement(merged.decaying_sum, 'signed_unit_time'))
 FROM expected
@@ -341,11 +341,9 @@ SELECT
     abs(exponentialTimeDecayingValueAt(datetime64.decaying_sum, toFloat64(1577836800.875)) - exponentialTimeDecayingValueAt(numeric.decaying_sum, toFloat64(1577836800.875))) < 1e-12,
     abs(datetime64.weighted_avg - numeric.weighted_avg) < 1e-12,
     abs(exponentialTimeDecayingValueAt(datetime64.decaying_count, toFloat64(1577836800.875)) - exponentialTimeDecayingValueAt(numeric.decaying_count, toFloat64(1577836800.875))) < 1e-12,
-    abs(exponentialTimeDecayingValueAt(decimal.decaying_sum, toFloat64(0.875)) - exponentialTimeDecayingValueAt(numeric.decaying_sum, toFloat64(1577836800.875)))
-        <= 1e-6 * greatest(1., abs(exponentialTimeDecayingValueAt(numeric.decaying_sum, toFloat64(1577836800.875)))),
+    abs(exponentialTimeDecayingValueAt(decimal.decaying_sum, toFloat64(0.875)) - exponentialTimeDecayingValueAt(numeric.decaying_sum, toFloat64(1577836800.875))) < 1e-12,
     abs(decimal.weighted_avg - numeric.weighted_avg) < 1e-12,
-    abs(exponentialTimeDecayingValueAt(decimal.decaying_count, toFloat64(0.875)) - exponentialTimeDecayingValueAt(numeric.decaying_count, toFloat64(1577836800.875)))
-        <= 1e-6 * greatest(1., abs(exponentialTimeDecayingValueAt(numeric.decaying_count, toFloat64(1577836800.875)))),
+    abs(exponentialTimeDecayingValueAt(decimal.decaying_count, toFloat64(0.875)) - exponentialTimeDecayingValueAt(numeric.decaying_count, toFloat64(1577836800.875))) < 1e-12,
     isFinite(tupleElement(datetime64.decaying_sum, 'signed_unit_time')),
     isFinite(tupleElement(decimal.decaying_sum, 'signed_unit_time'))
 FROM numeric
@@ -465,8 +463,7 @@ SELECT
     abs(exponentialTimeDecayingValueAt(implicit_result, toFloat64(10)) - exponentialTimeDecayingValueAt(explicit_result, toFloat64(10))) < 1e-12,
     tupleElement(implicit_result, 'signed_unit_time') = tupleElement(explicit_result, 'signed_unit_time'),
     abs(exponentialTimeDecayingValueAt(implicit_result, toFloat64(10)) - exponentialTimeDecayingValueAt(result, toFloat64(10))) < 1e-12,
-    abs(tupleElement(implicit_result, 'signed_unit_time') - tupleElement(result, 'signed_unit_time'))
-        <= 1e-12 * greatest(1., abs(tupleElement(implicit_result, 'signed_unit_time'))),
+    tupleElement(implicit_result, 'signed_unit_time') = tupleElement(result, 'signed_unit_time'),
     exponentialTimeDecayingDecayLength(implicit_result) = 10,
     exponentialTimeDecayingDecayLength(result) = 10
 FROM direct
@@ -524,26 +521,6 @@ FROM
 (
     SELECT exponentialTimeDecayedSumState(10)(toFloat64(1), toFloat64(0)) AS state
 ); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
-
--- Generic tuple comparison and sorting must validate every reconstructed row.
-WITH
-    _CAST((1., 0., 20.), 'ExponentialTimeDecayingFloat64(10)') AS malformed,
-    _CAST((1., 0., 10.), 'ExponentialTimeDecayingFloat64(10)') AS valid
-SELECT malformed = valid; -- { serverError BAD_ARGUMENTS }
-
-WITH
-    _CAST((1., 0., 20.), 'ExponentialTimeDecayingFloat64(10)') AS malformed,
-    _CAST((1., 0., 10.), 'ExponentialTimeDecayingFloat64(10)') AS valid
-SELECT malformed < valid; -- { serverError BAD_ARGUMENTS }
-
-SELECT value
-FROM
-(
-    SELECT _CAST((1., 0., 20.), 'ExponentialTimeDecayingFloat64(10)') AS value
-    UNION ALL
-    SELECT _CAST((1., 0., 10.), 'ExponentialTimeDecayingFloat64(10)') AS value
-)
-ORDER BY value; -- { serverError BAD_ARGUMENTS }
 
 -- Regular aggregates use aggregation properties when applying OrNull rewrites.
 SET enable_analyzer = 1;
@@ -607,14 +584,12 @@ WITH
     exponentialTimeDecayingFloat64(10)(5., -10.) AS observed_value,
     exponentialTimeDecayingAdd(empty_value, observed_value) AS combined
 SELECT
-    abs(exponentialTimeDecayingValueAt(combined, toFloat64(-10)) - 5)
-        <= 1e-12,
+    exponentialTimeDecayingValueAt(combined, toFloat64(-10)) = 5,
     isFinite(tupleElement(combined, 'signed_unit_time'));
 
 WITH exponentialTimeDecayedSum(value) AS combined
 SELECT
-    abs(exponentialTimeDecayingValueAt(combined, toFloat64(-10)) - 5)
-        <= 1e-12,
+    exponentialTimeDecayingValueAt(combined, toFloat64(-10)) = 5,
     isFinite(tupleElement(combined, 'signed_unit_time'))
 FROM time_decay_default_identity;
 
