@@ -895,7 +895,7 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         char * parse_end = nullptr;
         UInt64 seed = static_cast<UInt64>(std::strtoull(seed_from_environment, &parse_end, 10));
         ASSERT_NE(parse_end, seed_from_environment);
-        ASSERT_EQ(*parse_end, '\\0');
+        ASSERT_EQ(*parse_end, 0);
         seeds = {seed};
     }
 
