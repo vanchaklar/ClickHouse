@@ -7,12 +7,16 @@
 #include <Common/Scheduler/Nodes/tests/ResourceTest.h>
 #include <Common/MemoryTracker.h>
 
+#include <algorithm>
 #include <array>
 #include <barrier>
+#include <chrono>
 #include <cstdlib>
 #include <future>
+#include <iostream>
 #include <random>
 #include <thread>
+#include <vector>
 
 using namespace DB;
 
@@ -893,11 +897,38 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
     if (const char * seed_from_environment = std::getenv("CLICKHOUSE_SCHEDULER_RANDOM_SEED"))
     {
         char * parse_end = nullptr;
-        UInt64 seed = static_cast<UInt64>(std::strtoull(seed_from_environment, &parse_end, 10));
+        UInt64 base_seed = static_cast<UInt64>(std::strtoull(seed_from_environment, &parse_end, 10));
         ASSERT_NE(parse_end, seed_from_environment);
         ASSERT_EQ(*parse_end, 0);
-        seeds = {seed};
+
+        size_t iterations = 1;
+        if (const char * iterations_from_environment = std::getenv("CLICKHOUSE_SCHEDULER_RANDOM_ITERATIONS"))
+        {
+            parse_end = nullptr;
+            iterations = static_cast<size_t>(std::strtoull(iterations_from_environment, &parse_end, 10));
+            ASSERT_NE(parse_end, iterations_from_environment);
+            ASSERT_EQ(*parse_end, 0);
+            ASSERT_GT(iterations, 0u);
+            ASSERT_LE(iterations, 1000000u);
+        }
+
+        seeds.clear();
+        seeds.reserve(iterations);
+        for (size_t iteration = 0; iteration < iterations; ++iteration)
+            seeds.push_back(base_seed + iteration);
     }
+
+    const bool report_metrics = std::getenv("CLICKHOUSE_SCHEDULER_REPORT_METRICS") != nullptr;
+    const auto benchmark_started = std::chrono::steady_clock::now();
+    size_t total_fitting_requests_approved = 0;
+    size_t total_progress_events = 0;
+    size_t total_release_retry_checkpoints = 0;
+    size_t total_queries_completed = 0;
+    size_t peak_live_queries = 0;
+    ResourceCost peak_allocated = 0;
+    ResourceCost total_fitting_bytes_approved = 0;
+    ResourceCost total_bytes_released = 0;
+    size_t total_last_resort_kills = 0;
 
     for (UInt64 seed : seeds)
     {
@@ -938,6 +969,10 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         std::vector<LiveQuery> live_queries;
         size_t fitting_requests_approved = 1; // The anchor.
         size_t progress_events = 0;
+        size_t release_retry_checkpoints = 0;
+        size_t queries_completed = 0;
+        ResourceCost fitting_bytes_approved = anchor->size();
+        ResourceCost bytes_released = 0;
 
         auto totalAllocated = [&]()
         {
@@ -946,6 +981,7 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                 total += query.allocation->size();
             return total;
         };
+        peak_allocated = std::max(peak_allocated, totalAllocated());
 
         for (size_t round = 0; round < rounds; ++round)
         {
@@ -957,6 +993,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                 {
                     it = live_queries.erase(it);
                     ++progress_events;
+                    ++release_retry_checkpoints;
+                    ++queries_completed;
                 }
                 else
                     ++it;
@@ -970,6 +1008,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                 releaser.decreaseAsync(release_size);
                 releaser.waitSynced();
                 ++progress_events;
+                ++release_retry_checkpoints;
+                bytes_released += release_size;
                 ASSERT_EQ(heavy.killCount(), 0u) << "round=" << round;
             }
 
@@ -1030,7 +1070,10 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                     .rounds_left = static_cast<size_t>(randomBetween(1, 8)),
                 });
                 ++fitting_requests_approved;
+                fitting_bytes_approved += expected_sizes[index];
             }
+            peak_live_queries = std::max(peak_live_queries, live_queries.size());
+            peak_allocated = std::max(peak_allocated, totalAllocated());
 
             /// Randomly grow one admitted query, but never ask for more than the modelled free
             /// capacity. This covers fitting regular increases as well as fitting admissions.
@@ -1049,6 +1092,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                 ASSERT_EQ(query.size(), old_size + increase);
                 ASSERT_EQ(query.killCount(), 0u);
                 ++fitting_requests_approved;
+                fitting_bytes_approved += increase;
+                peak_allocated = std::max(peak_allocated, totalAllocated());
             }
 
             /// Randomly release part of a live query. Each release is another resource-state
@@ -1066,6 +1111,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
                     query.waitSynced();
                     ASSERT_EQ(query.size(), old_size - decrease);
                     ++progress_events;
+                    ++release_retry_checkpoints;
+                    bytes_released += decrease;
                 }
             }
 
@@ -1078,6 +1125,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         EXPECT_GT(fitting_requests_approved, rounds);
         EXPECT_GE(progress_events, rounds / 4);
 
+        queries_completed += live_queries.size();
+        release_retry_checkpoints += live_queries.size();
         live_queries.clear();
         anchor.reset();
 
@@ -1085,5 +1134,34 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         /// the existing last-resort kill path rather than remain parked forever.
         heavy.waitKills(1);
         EXPECT_EQ(heavy.killCount(), 1u);
+
+        total_fitting_requests_approved += fitting_requests_approved;
+        total_progress_events += progress_events;
+        total_release_retry_checkpoints += release_retry_checkpoints;
+        total_queries_completed += queries_completed;
+        total_fitting_bytes_approved += fitting_bytes_approved;
+        total_bytes_released += bytes_released;
+        total_last_resort_kills += heavy.killCount();
+    }
+
+    if (report_metrics)
+    {
+        const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - benchmark_started).count();
+        std::cout
+            << "SCHEDULER_METRICS"
+            << " seeds=" << seeds.size()
+            << " rounds_per_seed=" << rounds
+            << " fitting_requests_approved=" << total_fitting_requests_approved
+            << " fitting_bytes_approved=" << total_fitting_bytes_approved
+            << " queries_completed=" << total_queries_completed
+            << " progress_events=" << total_progress_events
+            << " release_retry_checkpoints=" << total_release_retry_checkpoints
+            << " peak_live_queries=" << peak_live_queries
+            << " peak_allocated=" << peak_allocated
+            << " bytes_released=" << total_bytes_released
+            << " last_resort_kills=" << total_last_resort_kills
+            << " elapsed_us=" << elapsed_us
+            << std::endl;
     }
 }
