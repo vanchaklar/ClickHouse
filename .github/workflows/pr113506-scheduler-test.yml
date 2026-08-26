@@ -30,10 +30,35 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Restore focused test binary
+        id: focused-binary-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ runner.os }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}-harness-v3
+
+      - name: Ensure benchmark timer
+        run: |
+          if [[ ! -x /usr/bin/time ]]; then
+            sudo apt-get update
+            sudo apt-get install -y time
+          fi
+
+      - name: Restore compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ runner.os }}-clang21-pr113506-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
+          restore-keys: |
+            ${{ runner.os }}-clang21-pr113506-ccache-
+
       - name: Install build tools
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates gnupg nasm ninja-build time wget
+          sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build wget
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
           sudo apt-get update
@@ -44,6 +69,7 @@ jobs:
           ninja --version
 
       - name: Add runner-only focused test target
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -86,11 +112,17 @@ jobs:
           PY
 
       - name: Configure focused build
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=clang-21 \
             -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_LINKER=ld.lld-21 \
             -DENABLE_TESTS=ON \
             -DENABLE_EXAMPLES=OFF \
@@ -107,7 +139,27 @@ jobs:
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF
 
       - name: Build focused scheduler test
-        run: cmake --build build --target unit_test_space_shared_scheduler --parallel 4
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          cmake --build build --target unit_test_space_shared_scheduler --parallel 4
+          ccache --show-stats
+
+      - name: Save compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Save focused test binary
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
 
       - name: Run focused scheduler tests
         run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
