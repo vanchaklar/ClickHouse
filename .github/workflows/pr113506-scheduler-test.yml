@@ -49,6 +49,13 @@ jobs:
           if (ENABLE_TESTS)
               file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
           #include <gtest/gtest.h>
+          #include <Common/ThreadStatus.h>
+
+          namespace DB
+          {
+          void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
+          }
+
           int main(int argc, char ** argv)
           {
               testing::InitGoogleTest(&argc, argv);
@@ -59,6 +66,7 @@ jobs:
               clickhouse_add_executable(
                   unit_test_space_shared_scheduler
                   Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+                  Core/Settings.cpp
                   "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
               )
               target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare)
