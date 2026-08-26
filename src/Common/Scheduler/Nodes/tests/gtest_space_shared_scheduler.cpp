@@ -9,6 +9,7 @@
 
 #include <array>
 #include <barrier>
+#include <cstdlib>
 #include <future>
 #include <random>
 #include <thread>
@@ -883,12 +884,20 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
 {
     constexpr ResourceCost limit = 10000;
     constexpr size_t rounds = 32;
-    constexpr std::array<UInt64, 4> seeds{
+    std::vector<UInt64> seeds{
         0x13579BDFULL,
         0x5EED1234ULL,
         0xC0FFEE42ULL,
         0xDEADBEEFULL,
     };
+    if (const char * seed_from_environment = std::getenv("CLICKHOUSE_SCHEDULER_RANDOM_SEED"))
+    {
+        char * parse_end = nullptr;
+        UInt64 seed = static_cast<UInt64>(std::strtoull(seed_from_environment, &parse_end, 10));
+        ASSERT_NE(parse_end, seed_from_environment);
+        ASSERT_EQ(*parse_end, '\\0');
+        seeds = {seed};
+    }
 
     for (UInt64 seed : seeds)
     {
