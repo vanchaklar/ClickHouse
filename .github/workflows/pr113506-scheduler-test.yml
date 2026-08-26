@@ -33,7 +33,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates gnupg nasm ninja-build wget
+          sudo apt-get install -y ca-certificates gnupg nasm ninja-build time wget
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
           sudo apt-get update
@@ -117,27 +117,109 @@ jobs:
         run: |
           duration_seconds=$((3 * 60 * 60))
           deadline=$((SECONDS + duration_seconds))
-          base_seed=$(date +%s)
+          seeds_per_invocation=100
+          base_seed=$(($(date +%s) * 1000000))
           iteration=0
-          test_log="$RUNNER_TEMP/pr113506-scheduler-stress.log"
+          test_log="$RUNNER_TEMP/pr113506-scheduler-stress-last.log"
+          time_log="$RUNNER_TEMP/pr113506-scheduler-stress-time.txt"
+          metrics_csv="$RUNNER_TEMP/pr113506-scheduler-stress-metrics.csv"
+
+          echo "iteration,base_seed,seeds,rounds_per_seed,fitting_requests_approved,fitting_bytes_approved,queries_completed,progress_events,release_retry_checkpoints,peak_live_queries,peak_allocated,bytes_released,last_resort_kills,test_elapsed_us,process_wall_seconds,user_seconds,system_seconds,max_rss_kb" >"$metrics_csv"
 
           while ((SECONDS < deadline)); do
             iteration=$((iteration + 1))
-            seed=$((base_seed + iteration))
+            seed=$((base_seed + (iteration - 1) * seeds_per_invocation))
 
-            if ! CLICKHOUSE_SCHEDULER_RANDOM_SEED="$seed" \
+            if ! /usr/bin/time -f '%e,%U,%S,%M' -o "$time_log" \
+              timeout --signal=KILL 120s \
+              env CLICKHOUSE_SCHEDULER_RANDOM_SEED="$seed" \
+                  CLICKHOUSE_SCHEDULER_RANDOM_ITERATIONS="$seeds_per_invocation" \
+                  CLICKHOUSE_SCHEDULER_REPORT_METRICS=1 \
               build/src/unit_test_space_shared_scheduler \
               --gtest_filter='SchedulerSpaceShared.LongLivedGrowthCanBeParkedRepeatedly:SchedulerSpaceShared.RandomizedFittingAllocationsAlwaysProgress' \
               --gtest_brief=1 >"$test_log" 2>&1
             then
-              echo "FAILED iteration=$iteration seed=$seed"
+              echo "FAILED invocation=$iteration base_seed=$seed seeds=$seeds_per_invocation"
               cat "$test_log"
               exit 1
             fi
 
-            if ((iteration % 100 == 0)); then
-              echo "passed iterations=$iteration last_seed=$seed elapsed_seconds=$SECONDS"
+            metric_line=$(grep '^SCHEDULER_METRICS ' "$test_log")
+            if [[ -z "$metric_line" ]]; then
+              echo "FAILED invocation=$iteration base_seed=$seed: metrics line missing"
+              cat "$test_log"
+              exit 1
+            fi
+
+            for field in $metric_line; do
+              if [[ "$field" == *=* ]]; then
+                key=${field%%=*}
+                value=${field#*=}
+                declare "$key=$value"
+              fi
+            done
+            IFS=, read -r wall_seconds user_seconds system_seconds max_rss_kb <"$time_log"
+
+            echo "$iteration,$seed,$seeds,$rounds_per_seed,$fitting_requests_approved,$fitting_bytes_approved,$queries_completed,$progress_events,$release_retry_checkpoints,$peak_live_queries,$peak_allocated,$bytes_released,$last_resort_kills,$elapsed_us,$wall_seconds,$user_seconds,$system_seconds,$max_rss_kb" >>"$metrics_csv"
+
+            if ((iteration % 10 == 0)); then
+              echo "passed invocations=$iteration seeds=$((iteration * seeds_per_invocation)) last_seed=$((seed + seeds_per_invocation - 1)) elapsed_seconds=$SECONDS wall_seconds=$wall_seconds max_rss_kb=$max_rss_kb"
             fi
           done
 
-          echo "stress test passed iterations=$iteration elapsed_seconds=$SECONDS"
+          python3 - "$metrics_csv" <<'PY'
+          import csv
+          import statistics
+          import sys
+
+          path = sys.argv[1]
+          with open(path, newline="") as metrics_file:
+              rows = list(csv.DictReader(metrics_file))
+
+          if not rows:
+              raise SystemExit("stress test produced no metrics")
+
+          wall = [float(row["process_wall_seconds"]) for row in rows]
+          internal_us = [int(row["test_elapsed_us"]) for row in rows]
+          rss = [int(row["max_rss_kb"]) for row in rows]
+
+          def percentile(values, fraction):
+              ordered = sorted(values)
+              return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))]
+
+          summary = {
+              "invocations": len(rows),
+              "seeds": sum(int(row["seeds"]) for row in rows),
+              "rounds": sum(int(row["seeds"]) * int(row["rounds_per_seed"]) for row in rows),
+              "fitting_requests_approved": sum(int(row["fitting_requests_approved"]) for row in rows),
+              "queries_completed": sum(int(row["queries_completed"]) for row in rows),
+              "release_retry_checkpoints": sum(int(row["release_retry_checkpoints"]) for row in rows),
+              "last_resort_kills": sum(int(row["last_resort_kills"]) for row in rows),
+              "wall_seconds": sum(wall),
+              "invocations_per_second": len(rows) / sum(wall),
+              "mean_test_ms": statistics.fmean(internal_us) / 1000,
+              "p50_test_ms": percentile(internal_us, 0.50) / 1000,
+              "p95_test_ms": percentile(internal_us, 0.95) / 1000,
+              "max_test_ms": max(internal_us) / 1000,
+              "max_rss_kb": max(rss),
+          }
+
+          print("stress benchmark summary")
+          for key, value in summary.items():
+              print(f"{key}={value}")
+
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
+              step_summary.write("## Scheduler randomized stress benchmark\n\n")
+              step_summary.write("| Metric | Result |\n|---|---:|\n")
+              for key, value in summary.items():
+                  step_summary.write(f"| {key} | {value} |\n")
+          PY
+
+      - name: Upload scheduler stress metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-scheduler-stress-metrics
+          path: ${{ runner.temp }}/pr113506-scheduler-stress-*
+          if-no-files-found: warn
+          retention-days: 14
