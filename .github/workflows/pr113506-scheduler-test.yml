@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pr113506-scheduler-test
+  cancel-in-progress: true
+
 jobs:
   scheduler-test:
     runs-on: ubuntu-24.04
@@ -107,3 +111,33 @@ jobs:
 
       - name: Run focused scheduler tests
         run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
+
+      - name: Stress randomized scheduler tests for three hours
+        timeout-minutes: 190
+        run: |
+          duration_seconds=$((3 * 60 * 60))
+          deadline=$((SECONDS + duration_seconds))
+          base_seed=$(date +%s)
+          iteration=0
+          test_log="$RUNNER_TEMP/pr113506-scheduler-stress.log"
+
+          while ((SECONDS < deadline)); do
+            iteration=$((iteration + 1))
+            seed=$((base_seed + iteration))
+
+            if ! CLICKHOUSE_SCHEDULER_RANDOM_SEED="$seed" \
+              build/src/unit_test_space_shared_scheduler \
+              --gtest_filter='SchedulerSpaceShared.LongLivedGrowthCanBeParkedRepeatedly:SchedulerSpaceShared.RandomizedFittingAllocationsAlwaysProgress' \
+              --gtest_brief=1 >"$test_log" 2>&1
+            then
+              echo "FAILED iteration=$iteration seed=$seed"
+              cat "$test_log"
+              exit 1
+            fi
+
+            if ((iteration % 100 == 0)); then
+              echo "passed iterations=$iteration last_seed=$seed elapsed_seconds=$SECONDS"
+            fi
+          done
+
+          echo "stress test passed iterations=$iteration elapsed_seconds=$SECONDS"
