@@ -1,0 +1,100 @@
+name: PR 113506 scheduler test
+
+on:
+  push:
+    branches:
+      - ci/pr113506-scheduler-test
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scheduler-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h /
+
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Install Clang 21 and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates gnupg ninja-build wget
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+          sudo apt-get update
+          sudo apt-get install -y clang-21 lld-21
+          clang++-21 --version
+          cmake --version
+          ninja --version
+
+      - name: Add runner-only focused test target
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/CMakeLists.txt")
+          path.write_text(path.read_text() + r"""
+          if (ENABLE_TESTS)
+              file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
+          #include <gtest/gtest.h>
+          int main(int argc, char ** argv)
+          {
+              testing::InitGoogleTest(&argc, argv);
+              return RUN_ALL_TESTS();
+          }
+          ]=])
+
+              clickhouse_add_executable(
+                  unit_test_space_shared_scheduler
+                  Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+                  "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
+              )
+              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare)
+              target_link_libraries(
+                  unit_test_space_shared_scheduler PRIVATE
+                  ch_contrib::gmock_all
+                  ch_contrib::gtest
+                  clickhouse_common_io
+                  clickhouse_common_config
+              )
+          endif()
+          """)
+          PY
+
+      - name: Configure focused build
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-21 \
+            -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DCMAKE_LINKER=ld.lld-21 \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EXAMPLES=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DENABLE_JEMALLOC=OFF \
+            -DENABLE_AWS_S3=OFF \
+            -DENABLE_AZURE_BLOB_STORAGE=OFF \
+            -DENABLE_HDFS=OFF \
+            -DENABLE_KAFKA=OFF \
+            -DENABLE_NATS=OFF \
+            -DENABLE_RABBITMQ=OFF \
+            -DENABLE_GRPC=OFF \
+            -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF
+
+      - name: Build focused scheduler test
+        run: cmake --build build --target unit_test_space_shared_scheduler --parallel 4
+
+      - name: Run focused scheduler tests
+        run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
