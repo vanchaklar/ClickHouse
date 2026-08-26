@@ -991,10 +991,12 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
             {
                 if (--it->rounds_left == 0)
                 {
+                    ResourceCost completed_size = it->allocation->size();
                     it = live_queries.erase(it);
                     ++progress_events;
                     ++release_retry_checkpoints;
                     ++queries_completed;
+                    bytes_released += completed_size;
                 }
                 else
                     ++it;
@@ -1016,8 +1018,12 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
             ResourceCost free = limit - totalAllocated();
             while (free < 4 && !live_queries.empty())
             {
+                ResourceCost completed_size = live_queries.front().allocation->size();
                 live_queries.erase(live_queries.begin());
                 ++progress_events;
+                ++release_retry_checkpoints;
+                ++queries_completed;
+                bytes_released += completed_size;
                 free = limit - totalAllocated();
             }
             ASSERT_GT(free, 0);
@@ -1125,6 +1131,8 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         EXPECT_GT(fitting_requests_approved, rounds);
         EXPECT_GE(progress_events, rounds / 4);
 
+        for (const auto & query : live_queries)
+            bytes_released += query.allocation->size();
         queries_completed += live_queries.size();
         release_retry_checkpoints += live_queries.size();
         live_queries.clear();
