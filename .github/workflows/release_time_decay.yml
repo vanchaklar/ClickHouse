@@ -1,0 +1,90 @@
+name: Release experimental time-decay build
+
+on:
+  push:
+    branches:
+      - release/experimental-time-decay
+    paths:
+      - .github/workflows/release_time_decay.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-experimental-time-decay
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    name: Build and publish Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          docker system prune --all --force
+          df -h
+
+      - name: Check out source and submodules
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Build ClickHouse
+        env:
+          BUILDER_IMAGE: clickhouse/binary-builder:3d77afa74688811fb157
+        run: |
+          mkdir -p build-release
+          docker pull "${BUILDER_IMAGE}"
+          docker run --rm             --user "$(id -u):$(id -g)"             --env HOME=/tmp             --volume "${PWD}:/work"             --workdir /work             "${BUILDER_IMAGE}"             bash -euxo pipefail -c '
+              cmake -S . -B build-release -G Ninja                 -DCMAKE_BUILD_TYPE=Release                 -DENABLE_THINLTO=0                 -DENABLE_TESTS=0                 -DENABLE_UTILS=0                 -DENABLE_EXAMPLES=0                 -DENABLE_BENCHMARKS=0                 -DENABLE_CLICKHOUSE_SELF_EXTRACTING=0
+              cmake --build build-release --target clickhouse > build-release/build.log 2>&1
+            '
+
+      - name: Package and smoke-test
+        id: package
+        run: |
+          set -euxo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          tag="experimental-time-decay-${short_sha}"
+          asset="clickhouse-time-decay-linux-x86_64-${short_sha}"
+
+          mkdir -p dist/package
+          install -m 0755 build-release/programs/clickhouse "dist/package/clickhouse"
+          printf '%s\n'             "Experimental ClickHouse build from ${GITHUB_REPOSITORY}@${GITHUB_SHA}"             "Includes the work from ClickHouse/ClickHouse#110934."             "Linux x86_64; unsupported prerelease; not an official ClickHouse build."             > dist/package/README.txt
+
+          dist/package/clickhouse local --query             "SELECT exponentialTimeDecayedAvg(60)(toFloat64(number), number) FROM numbers(3) SETTINGS allow_experimental_time_decay_aggregate_functions = 1"
+
+          tar -C dist/package -czf "dist/${asset}.tar.gz" clickhouse README.txt
+          sha256sum "dist/${asset}.tar.gz" > "dist/${asset}.tar.gz.sha256"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: time-decay-build-log-${{ github.sha }}
+          path: build-release/build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          set -euxo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/*.tar.gz dist/*.sha256               --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" dist/*.tar.gz dist/*.sha256               --repo "${GITHUB_REPOSITORY}"               --target "${GITHUB_SHA}"               --title "Experimental time-decay ClickHouse ${GITHUB_SHA::12}"               --notes "Unofficial Linux x86_64 prerelease containing the experimental time-decay aggregate work from ClickHouse/ClickHouse#110934. It does not include the Queue table engine."               --prerelease
+          fi
