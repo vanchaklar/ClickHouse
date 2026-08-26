@@ -1,6 +1,9 @@
 #include <QueryPipeline/BlockIO.h>
 #include <Interpreters/ProcessList.h>
 
+#include <exception>
+#include <utility>
+
 namespace DB
 {
 
@@ -8,6 +11,8 @@ void BlockIO::resetPipeline(bool cancel)
 {
     if (cancel)
         pipeline.cancel();
+    /// May use storage that is protected by pipeline, so should be destroyed first
+    query_metadata_cache.reset();
     pipeline.reset();
 }
 
@@ -42,6 +47,7 @@ BlockIO & BlockIO::operator= (BlockIO && rhs) /// NOLINT(hicpp-noexcept-move,per
     reset();
 
     process_list_entries    = std::move(rhs.process_list_entries);
+    query_metadata_cache    = std::move(rhs.query_metadata_cache);
     pipeline                = std::move(rhs.pipeline);
 
     finalize_query_pipeline = std::move(rhs.finalize_query_pipeline);
@@ -49,7 +55,6 @@ BlockIO & BlockIO::operator= (BlockIO && rhs) /// NOLINT(hicpp-noexcept-move,per
     exception_callbacks     = std::move(rhs.exception_callbacks);
 
     null_format             = rhs.null_format;
-    dispatched              = rhs.dispatched;
 
     return *this;
 }
@@ -69,25 +74,52 @@ void BlockIO::onFinish(std::chrono::system_clock::time_point finish_time)
     /// in `PipelineExecutor`) and read it until the pipeline is finalized below, so releasing it here would
     /// be a data race. It is released a bit later instead — the extra hold is brief and harmless.
     releaseQuerySlot();
-    if (finalize_query_pipeline)
+    try
     {
-        const QueryPipelineFinalizedInfo query_pipeline_finalized_info = finalize_query_pipeline(std::move(pipeline));
-        for (const auto & callback : finish_callbacks)
-            callback(query_pipeline_finalized_info, finish_time);
-    }
-    else
-        resetPipeline(/*cancel=*/false);
+        if (finalize_query_pipeline)
+        {
+            /// Keep the same teardown order as in resetPipeline:
+            query_metadata_cache.reset();
+            const QueryPipelineFinalizedInfo query_pipeline_finalized_info = finalize_query_pipeline(std::move(pipeline));
+            for (const auto & callback : finish_callbacks)
+                callback(query_pipeline_finalized_info, finish_time);
+        }
+        else
+            resetPipeline(/*cancel=*/false);
 
-    /// Safe now: the pipeline (and its threads) have been finalized and joined.
-    releaseMemoryReservation();
+        /// Safe now: the pipeline (and its threads) have been finalized and joined.
+        releaseMemoryReservation();
+    }
+    catch (...)
+    {
+        auto finish_exception = std::current_exception();
+        try
+        {
+            onException();
+        }
+        catch (...)
+        {
+        }
+        std::rethrow_exception(finish_exception);
+    }
 }
 
 void BlockIO::onException(bool log_as_error)
 {
     setAllDataSent();
 
-    for (const auto & callback : exception_callbacks)
-        callback(log_as_error);
+    auto callbacks = std::exchange(exception_callbacks, {});
+    try
+    {
+        for (const auto & callback : callbacks)
+            callback(log_as_error);
+    }
+    catch (...)
+    {
+        resetPipeline(/*cancel=*/true);
+        releaseWorkloadResources();
+        throw;
+    }
 
     /// Stop the pipeline before releasing workload resources: pipeline threads hold raw
     /// pointers to `MemoryReservation` and call `syncWithMemoryTracker` between processors.

@@ -29,6 +29,7 @@ void registerStorageWindowView(StorageFactory & factory);
 void registerStorageLoop(StorageFactory & factory);
 void registerStorageFuzzQuery(StorageFactory & factory);
 void registerStorageTimeSeries(StorageFactory & factory);
+void registerStorageQueue(StorageFactory & factory);
 void registerStorageAlias(StorageFactory & factory);
 
 #if USE_ARROWFLIGHT
@@ -79,7 +80,6 @@ void registerStorageYTsaurus(StorageFactory & factory);
 #endif
 
 void registerStorageRedis(StorageFactory & factory);
-void registerStorageBigQuery(StorageFactory & factory);
 
 
 #if USE_RDKAFKA
@@ -142,6 +142,7 @@ void registerStorages()
     registerStorageLoop(factory);
     registerStorageFuzzQuery(factory);
     registerStorageTimeSeries(factory);
+    registerStorageQueue(factory);
     registerStorageAlias(factory);
 
 #if USE_ARROWFLIGHT
@@ -189,7 +190,6 @@ void registerStorages()
 
     registerStorageYTsaurus(factory);
     registerStorageRedis(factory);
-    registerStorageBigQuery(factory);
 
 #if USE_RDKAFKA
     registerStorageKafka(factory);
