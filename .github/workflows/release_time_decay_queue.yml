@@ -37,22 +37,15 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Restore compiler cache
-        uses: actions/cache@v4
-        with:
-          path: .ccache
-          key: clickhouse-linux-x86_64-3d77-${{ github.sha }}
-          restore-keys: |
-            clickhouse-linux-x86_64-3d77-
 
       - name: Build ClickHouse
         env:
           BUILDER_IMAGE: clickhouse/binary-builder:3d77afa74688811fb157
         run: |
-          mkdir -p build-release .ccache
+          mkdir -p build-release
           docker pull "${BUILDER_IMAGE}"
-          docker run --rm             --user "$(id -u):$(id -g)"             --env HOME=/tmp             --env CCACHE_DIR=/work/.ccache             --env CCACHE_MAXSIZE=8G             --volume "${PWD}:/work"             --workdir /work             "${BUILDER_IMAGE}"             bash -euxo pipefail -c '
-              cmake -S . -B build-release -G Ninja                 -DCMAKE_BUILD_TYPE=Release                 -DCOMPILER_CACHE=ccache                 -DENABLE_THINLTO=0                 -DENABLE_TESTS=0                 -DENABLE_UTILS=0                 -DENABLE_EXAMPLES=0                 -DENABLE_BENCHMARKS=0                 -DENABLE_CLICKHOUSE_SELF_EXTRACTING=0
+          docker run --rm             --user "$(id -u):$(id -g)"             --env HOME=/tmp             --volume "${PWD}:/work"             --workdir /work             "${BUILDER_IMAGE}"             bash -euxo pipefail -c '
+              cmake -S . -B build-release -G Ninja                 -DCMAKE_BUILD_TYPE=Release                 -DENABLE_THINLTO=0                 -DENABLE_TESTS=0                 -DENABLE_UTILS=0                 -DENABLE_EXAMPLES=0                 -DENABLE_BENCHMARKS=0                 -DENABLE_CLICKHOUSE_SELF_EXTRACTING=0
               cmake --build build-release --target clickhouse > build-release/build.log 2>&1
             '
 
