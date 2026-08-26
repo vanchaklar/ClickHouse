@@ -26,16 +26,17 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Install Clang 21 and Ninja
+      - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates gnupg ninja-build wget
+          sudo apt-get install -y ca-certificates gnupg nasm ninja-build wget
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
           sudo apt-get update
           sudo apt-get install -y clang-21 lld-21
           clang++-21 --version
           cmake --version
+          nasm --version
           ninja --version
 
       - name: Add runner-only focused test target
