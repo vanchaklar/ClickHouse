@@ -7,8 +7,10 @@
 #include <Common/Scheduler/Nodes/tests/ResourceTest.h>
 #include <Common/MemoryTracker.h>
 
+#include <array>
 #include <barrier>
 #include <future>
+#include <random>
 #include <thread>
 
 using namespace DB;
@@ -814,4 +816,265 @@ TEST(SchedulerSpaceShared, BlockedGrowthWithoutBeneficiaryStillKills)
 
     EXPECT_EQ(heavy.killCount(), 1u);
     EXPECT_EQ(heavy.size(), 8000);
+}
+
+
+
+/// A long-lived allocation can yield the same blocked growth more than once. Every partial release
+/// retries that growth; while it still cannot fit, it must be parked again instead of being killed.
+/// Smaller reservations must keep flowing through every suspension round.
+TEST(SchedulerSpaceShared, LongLivedGrowthCanBeParkedRepeatedly)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    ManualAllocation heavy(queue, "heavy", 6000);
+    ManualAllocation releaser(queue, "releaser", 3000);
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+    entered.get_future().get();
+
+    heavy.increaseAsync(6000); // Impossible even if every other allocation releases its memory.
+    auto anchor = std::make_unique<ManualAllocation>(queue, "anchor", 500, /* wait_for_admission = */ false);
+    release.set_value();
+
+    anchor->waitSynced();
+    ASSERT_EQ(heavy.killCount(), 0u);
+
+    constexpr std::array<ResourceCost, 4> releases{200, 300, 400, 500};
+    for (size_t round = 0; round < releases.size(); ++round)
+    {
+        releaser.decreaseAsync(releases[round]); // Retries and re-parks the blocked heavy growth.
+        releaser.waitSynced();
+        ASSERT_EQ(heavy.killCount(), 0u) << "round=" << round;
+
+        ManualAllocation fitting(queue, fmt::format("fitting_{}", round), 100);
+        EXPECT_EQ(fitting.size(), 100);
+        EXPECT_EQ(fitting.killCount(), 0u);
+    }
+
+    EXPECT_EQ(heavy.size(), 6000);
+    EXPECT_EQ(releaser.size(), 1600);
+
+    /// Removing the last beneficiary exhausts suspension. The impossible growth must then reach
+    /// the existing last-resort eviction path.
+    anchor.reset();
+    heavy.waitKills(1);
+    EXPECT_EQ(heavy.killCount(), 1u);
+}
+
+
+/// Property-style stress test for the flow invariant. A permanently impossible growth request is
+/// kept alive while a deterministic random stream mixes:
+/// - pending allocations, including batches queued behind the blocked growth;
+/// - fitting growth of already admitted allocations;
+/// - partial releases;
+/// - short- and long-lived allocations.
+///
+/// Every generated request is bounded by the free capacity observed by the model. Therefore every
+/// one must be approved, no fitting allocation may be killed, and accounted usage must stay within
+/// the hard limit. Fixed seeds make failures exactly reproducible.
+TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
+{
+    constexpr ResourceCost limit = 10000;
+    constexpr size_t rounds = 32;
+    constexpr std::array<UInt64, 4> seeds{
+        0x13579BDFULL,
+        0x5EED1234ULL,
+        0xC0FFEE42ULL,
+        0xDEADBEEFULL,
+    };
+
+    for (UInt64 seed : seeds)
+    {
+        SCOPED_TRACE(fmt::format("seed={}", seed));
+
+        SpaceSharedTest t;
+        SpaceSharedResourceHolder r(t);
+        r.addLimit("/", limit);
+        AllocationQueue * queue = r.addQueue("/queue");
+        r.registerResource();
+
+        std::mt19937_64 rng(seed);
+        auto randomBetween = [&](ResourceCost minimum, ResourceCost maximum)
+        {
+            std::uniform_int_distribution<ResourceCost> distribution(minimum, maximum);
+            return distribution(rng);
+        };
+
+        ManualAllocation heavy(queue, "heavy", 5000);
+        ManualAllocation releaser(queue, "releaser", 3000);
+
+        std::promise<void> entered;
+        std::promise<void> release;
+        t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+        entered.get_future().get();
+
+        heavy.increaseAsync(6000); // 5000 + 6000 > limit even when heavy is alone.
+        auto anchor = std::make_unique<ManualAllocation>(queue, "anchor", 200, /* wait_for_admission = */ false);
+        release.set_value();
+        anchor->waitSynced();
+
+        struct LiveQuery
+        {
+            std::unique_ptr<ManualAllocation> allocation;
+            size_t rounds_left;
+        };
+
+        std::vector<LiveQuery> live_queries;
+        size_t fitting_requests_approved = 1; // The anchor.
+        size_t progress_events = 0;
+
+        auto totalAllocated = [&]()
+        {
+            ResourceCost total = heavy.size() + releaser.size() + anchor->size();
+            for (auto & query : live_queries)
+                total += query.allocation->size();
+            return total;
+        };
+
+        for (size_t round = 0; round < rounds; ++round)
+        {
+            /// Complete queries whose randomized lifetime expired. The anchor remains alive, so
+            /// these releases retry/re-park heavy growth without exhausting suspension.
+            for (auto it = live_queries.begin(); it != live_queries.end();)
+            {
+                if (--it->rounds_left == 0)
+                {
+                    it = live_queries.erase(it);
+                    ++progress_events;
+                }
+                else
+                    ++it;
+            }
+
+            /// Guarantee repeated progress checkpoints for the long-lived blocked growth.
+            if (round % 4 == 0)
+            {
+                ResourceCost release_size = randomBetween(50, 200);
+                release_size = std::min(release_size, releaser.size());
+                releaser.decreaseAsync(release_size);
+                releaser.waitSynced();
+                ++progress_events;
+                ASSERT_EQ(heavy.killCount(), 0u) << "round=" << round;
+            }
+
+            ResourceCost free = limit - totalAllocated();
+            while (free < 4 && !live_queries.empty())
+            {
+                live_queries.erase(live_queries.begin());
+                ++progress_events;
+                free = limit - totalAllocated();
+            }
+            ASSERT_GT(free, 0);
+
+            /// Queue a random fitting batch while the scheduler is parked so every request is
+            /// simultaneously visible behind the suspended heavy growth.
+            size_t max_batch = static_cast<size_t>(std::min<ResourceCost>(4, free));
+            size_t batch_size = static_cast<size_t>(randomBetween(1, static_cast<ResourceCost>(max_batch)));
+            ResourceCost batch_total = randomBetween(
+                static_cast<ResourceCost>(batch_size),
+                std::min<ResourceCost>(free, 600));
+
+            std::vector<ResourceCost> expected_sizes;
+            expected_sizes.reserve(batch_size);
+            ResourceCost remaining = batch_total;
+            for (size_t index = 0; index < batch_size; ++index)
+            {
+                ResourceCost remaining_queries = static_cast<ResourceCost>(batch_size - index - 1);
+                ResourceCost size = index + 1 == batch_size
+                    ? remaining
+                    : randomBetween(1, remaining - remaining_queries);
+                expected_sizes.push_back(size);
+                remaining -= size;
+            }
+
+            std::promise<void> batch_entered;
+            std::promise<void> batch_release;
+            t.scheduler.event_queue.enqueue([&] { batch_entered.set_value(); batch_release.get_future().get(); });
+            batch_entered.get_future().get();
+
+            std::vector<std::unique_ptr<ManualAllocation>> batch;
+            batch.reserve(batch_size);
+            for (size_t index = 0; index < batch_size; ++index)
+            {
+                batch.emplace_back(std::make_unique<ManualAllocation>(
+                    queue,
+                    fmt::format("random_{}_{}_{}", seed, round, index),
+                    expected_sizes[index],
+                    /* wait_for_admission = */ false));
+            }
+            batch_release.set_value();
+
+            for (size_t index = 0; index < batch_size; ++index)
+            {
+                batch[index]->waitSynced();
+                ASSERT_EQ(batch[index]->size(), expected_sizes[index]);
+                ASSERT_EQ(batch[index]->killCount(), 0u);
+                live_queries.push_back({
+                    .allocation = std::move(batch[index]),
+                    .rounds_left = static_cast<size_t>(randomBetween(1, 8)),
+                });
+                ++fitting_requests_approved;
+            }
+
+            /// Randomly grow one admitted query, but never ask for more than the modelled free
+            /// capacity. This covers fitting regular increases as well as fitting admissions.
+            free = limit - totalAllocated();
+            if (free > 0 && !live_queries.empty() && randomBetween(0, 1) != 0)
+            {
+                size_t index = static_cast<size_t>(
+                    randomBetween(0, static_cast<ResourceCost>(live_queries.size() - 1)));
+                ManualAllocation & query = *live_queries[index].allocation;
+                ResourceCost increase = randomBetween(1, std::min<ResourceCost>(free, 250));
+                ResourceCost old_size = query.size();
+
+                query.increaseAsync(increase);
+                query.waitSynced();
+
+                ASSERT_EQ(query.size(), old_size + increase);
+                ASSERT_EQ(query.killCount(), 0u);
+                ++fitting_requests_approved;
+            }
+
+            /// Randomly release part of a live query. Each release is another resource-state
+            /// checkpoint that retries the long-lived growth and may park it again.
+            if (!live_queries.empty() && randomBetween(0, 1) != 0)
+            {
+                size_t index = static_cast<size_t>(
+                    randomBetween(0, static_cast<ResourceCost>(live_queries.size() - 1)));
+                ManualAllocation & query = *live_queries[index].allocation;
+                ResourceCost old_size = query.size();
+                if (old_size > 0)
+                {
+                    ResourceCost decrease = randomBetween(1, old_size);
+                    query.decreaseAsync(decrease);
+                    query.waitSynced();
+                    ASSERT_EQ(query.size(), old_size - decrease);
+                    ++progress_events;
+                }
+            }
+
+            ASSERT_LE(totalAllocated(), limit);
+            ASSERT_EQ(heavy.killCount(), 0u) << "round=" << round;
+            for (auto & query : live_queries)
+                ASSERT_EQ(query.allocation->killCount(), 0u);
+        }
+
+        EXPECT_GT(fitting_requests_approved, rounds);
+        EXPECT_GE(progress_events, rounds / 4);
+
+        live_queries.clear();
+        anchor.reset();
+
+        /// Once every beneficiary finishes, the heavy request is still impossible and must reach
+        /// the existing last-resort kill path rather than remain parked forever.
+        heavy.waitKills(1);
+        EXPECT_EQ(heavy.killCount(), 1u);
+    }
 }
