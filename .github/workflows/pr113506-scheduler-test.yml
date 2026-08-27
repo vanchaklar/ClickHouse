@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
-          key: ${{ runner.os }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}-harness-v3
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ github.sha }}-harness-v4
 
       - name: Ensure benchmark timer
         run: |
@@ -46,9 +46,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/pr113506-ccache
-          key: ${{ runner.os }}-clang21-pr113506-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
           restore-keys: |
-            ${{ runner.os }}-clang21-pr113506-ccache-
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
       - name: Install build tools
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -144,21 +144,21 @@ jobs:
           ccache --show-stats
 
       - name: Save compiler cache
-        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true' && steps.compiler-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/pr113506-ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
-      - name: Save focused test binary
+      - name: Run focused scheduler tests
+        run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
+
+      - name: Save verified focused test binary
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
           key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
-
-      - name: Run focused scheduler tests
-        run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
 
       - name: Stress randomized scheduler tests for three hours
         timeout-minutes: 190
