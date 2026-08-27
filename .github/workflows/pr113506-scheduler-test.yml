@@ -9,13 +9,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pr113506-scheduler-test
-  cancel-in-progress: true
-
 jobs:
   scheduler-test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
