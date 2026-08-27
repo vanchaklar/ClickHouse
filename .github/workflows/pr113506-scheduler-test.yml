@@ -99,7 +99,7 @@ jobs:
 
               clickhouse_add_executable(
                   unit_test_space_shared_scheduler
-                  Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+                  ../.github/ci/pr113506_desired_scheduler_tests.cpp
                   Core/Settings.cpp
                   "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
               )
@@ -158,7 +158,86 @@ jobs:
           path: ${{ runner.temp }}/pr113506-ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
+      - name: Run aspirational scheduler scenarios independently
+        run: |
+          result_dir="$RUNNER_TEMP/pr113506-desired-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceSharedDesired.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+          tests+=("SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation")
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          {
+            echo "## Intended scheduler behavior scenarios"
+            echo
+            echo "| Scenario | Result | Time (ms) |"
+            echo "|---|---:|---:|"
+            tail -n +2 "$results_csv" | while IFS=, read -r test_name result exit_code elapsed_ms; do
+              echo "| \`$test_name\` | $result | $elapsed_ms |"
+            done
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "desired_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Upload aspirational scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-desired-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-desired-scenarios
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Run focused scheduler tests
+        if: always()
         run: |
           timeout --signal=KILL 120s \
             stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
@@ -166,7 +245,7 @@ jobs:
             --gtest_print_time=1
 
       - name: Save verified focused test binary
-        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        if: always() && steps.focused-binary-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
