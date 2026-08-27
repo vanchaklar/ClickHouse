@@ -33,6 +33,14 @@ jobs:
           path: build/src/unit_test_space_shared_scheduler
           key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ github.sha }}-harness-v4
 
+      - name: Disable unavailable runner package repositories
+        run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+              sudo mv "$source" "$source.disabled"
+            fi
+          done
+
       - name: Ensure benchmark timer
         run: |
           if [[ ! -x /usr/bin/time ]]; then
