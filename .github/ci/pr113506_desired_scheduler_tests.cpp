@@ -367,7 +367,7 @@ TEST(SchedulerSpaceSharedDesired, ConcurrentFittingArrivalsAllProgress)
     heavy.increaseAsync(5000);
 
     constexpr size_t query_count = 8;
-    std::barrier start(query_count + 1);
+    std::barrier<> start(query_count + 1);
     std::vector<std::unique_ptr<ManualAllocation>> fitting(query_count);
     std::vector<std::thread> threads;
     threads.reserve(query_count);
