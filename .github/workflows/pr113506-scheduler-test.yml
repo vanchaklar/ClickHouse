@@ -159,7 +159,11 @@ jobs:
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
       - name: Run focused scheduler tests
-        run: build/src/unit_test_space_shared_scheduler --gtest_filter='SchedulerSpaceShared.*'
+        run: |
+          timeout --signal=KILL 120s \
+            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+            --gtest_filter='SchedulerSpaceShared.*' \
+            --gtest_print_time=1
 
       - name: Save verified focused test binary
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
