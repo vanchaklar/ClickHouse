@@ -887,17 +887,13 @@ void suspendedIncreaseIsHiddenThroughPolicyHierarchy()
     heavy.increaseAsync(5000);
     auto small = std::make_unique<ManualAllocation>(small_queue_ptr, "small", 1000, /* wait_for_admission = */ false);
 
-    std::promise<std::pair<ResourceCost, size_t>> observed;
-    auto observed_future = observed.get_future();
-    t.scheduler.event_queue.enqueue([&]
-    {
-        observed.set_value({small->size(), heavy.killCount()});
-    });
     release.set_value();
 
-    auto [small_size, heavy_kills] = observed_future.get();
-    EXPECT_EQ(small_size, 1000);
-    EXPECT_EQ(heavy_kills, 0u);
+    /// Events are processed before approvals, so observe the policy through the actual admission
+    /// completion rather than an event that can legitimately run first.
+    small->waitSynced();
+    EXPECT_EQ(small->size(), 1000);
+    EXPECT_EQ(heavy.killCount(), 0u);
 
     /// The admitted sibling remains productive work, so the heavy query stays suspended until the
     /// sibling releases its allocation. That release retries the growth across queue boundaries.
