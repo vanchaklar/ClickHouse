@@ -4,6 +4,8 @@
 #include <Common/Scheduler/Nodes/SpaceShared/SpaceSharedScheduler.h>
 #include <Common/Scheduler/Nodes/SpaceShared/AllocationLimit.h>
 #include <Common/Scheduler/Nodes/SpaceShared/AllocationQueue.h>
+#include <Common/Scheduler/Nodes/SpaceShared/FairAllocation.h>
+#include <Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.h>
 #include <Common/Scheduler/Nodes/tests/ResourceTest.h>
 #include <Common/MemoryTracker.h>
 
@@ -722,7 +724,7 @@ TEST(SchedulerSpaceShared, MemoryReleaseLetsSuspendedGrowthResume)
     r.registerResource();
 
     ManualAllocation heavy(queue, "heavy", 6000);
-    ManualAllocation releaser(queue, "releaser", 3000);
+    auto releaser = std::make_unique<ManualAllocation>(queue, "releaser", 3000);
 
     std::promise<void> entered;
     std::promise<void> release;
@@ -805,6 +807,118 @@ TEST(SchedulerSpaceShared, BlockedAlternativeFallsBackToEviction)
 }
 
 
+/// A non-fitting alternative must not terminate the search. The queue preserves FIFO order for normal
+/// admission, but within a suspension round every later request gets a fit check before eviction.
+TEST(SchedulerSpaceShared, FittingAllocationBehindBlockedAlternativeRunsBeforeEviction)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    ManualAllocation heavy(queue, "heavy", 8000);
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+    entered.get_future().get();
+
+    heavy.increaseAsync(5000);
+    auto blocked = std::make_unique<ManualAllocation>(queue, "blocked", 3000, /* wait_for_admission = */ false);
+    auto fitting = std::make_unique<ManualAllocation>(queue, "fitting", 1000, /* wait_for_admission = */ false);
+    release.set_value();
+
+    fitting->waitSynced();
+    EXPECT_EQ(fitting->size(), 1000);
+    EXPECT_EQ(blocked->size(), 0);
+    EXPECT_EQ(heavy.killCount(), 0u);
+
+    /// Releasing the fitting beneficiary starts a new resource-state round. The +3000 request is
+    /// reconsidered, still cannot fit, and only then may the original growth reach eviction.
+    fitting.reset();
+    heavy.waitKills(1);
+    EXPECT_EQ(heavy.killCount(), 1u);
+}
+
+
+template <typename Policy>
+void suspendedIncreaseIsHiddenThroughPolicyHierarchy()
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+
+    auto limit = std::make_shared<AllocationLimit>(t.scheduler.event_queue, SchedulerNodeInfo{}, 10000);
+    auto policy = std::make_shared<Policy>(t.scheduler.event_queue, SchedulerNodeInfo{});
+    policy->basename = "policy";
+    limit->attachChild(policy);
+
+    SchedulerNodeInfo heavy_info;
+    heavy_info.setPrecedence(0);
+    auto heavy_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, heavy_info);
+    heavy_queue->basename = "heavy_queue";
+    AllocationQueue * heavy_queue_ptr = heavy_queue.get();
+    policy->attachChild(heavy_queue);
+
+    SchedulerNodeInfo small_info;
+    small_info.setPrecedence(1);
+    auto small_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, small_info);
+    small_queue->basename = "small_queue";
+    AllocationQueue * small_queue_ptr = small_queue.get();
+    policy->attachChild(small_queue);
+
+    r.root_node = limit;
+    /// The holder must own the complete subtree so destruction happens on the scheduler thread.
+    small_queue.reset();
+    heavy_queue.reset();
+    policy.reset();
+    limit.reset();
+    r.registerResource();
+
+    ManualAllocation heavy(heavy_queue_ptr, "heavy", 8000);
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+    entered.get_future().get();
+
+    /// The sibling activation is queued before the heavy queue's post-suspension activation. Parent
+    /// policies must nevertheless stop selecting the stale +5000 request as soon as it is suspended.
+    heavy.increaseAsync(5000);
+    auto small = std::make_unique<ManualAllocation>(small_queue_ptr, "small", 1000, /* wait_for_admission = */ false);
+
+    std::promise<std::pair<ResourceCost, size_t>> observed;
+    auto observed_future = observed.get_future();
+    t.scheduler.event_queue.enqueue([&]
+    {
+        observed.set_value({small->size(), heavy.killCount()});
+    });
+    release.set_value();
+
+    auto [small_size, heavy_kills] = observed_future.get();
+    EXPECT_EQ(small_size, 1000);
+    EXPECT_EQ(heavy_kills, 0u);
+
+    /// The admitted sibling remains productive work, so the heavy query stays suspended until the
+    /// sibling releases its allocation. That release retries the growth across queue boundaries.
+    EXPECT_EQ(heavy.killCount(), 0u);
+    small.reset();
+    heavy.waitKills(1);
+}
+
+
+TEST(SchedulerSpaceShared, SuspendedIncreaseIsHiddenThroughFairHierarchy)
+{
+    suspendedIncreaseIsHiddenThroughPolicyHierarchy<FairAllocation>();
+}
+
+
+TEST(SchedulerSpaceShared, SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy)
+{
+    suspendedIncreaseIsHiddenThroughPolicyHierarchy<PrecedenceAllocation>();
+}
+
+
 /// Parking is only a step before eviction. If a blocked regular increase has no request behind it, it is
 /// immediately restored and the next evaluation follows the existing hard-limit kill policy.
 TEST(SchedulerSpaceShared, BlockedGrowthWithoutBeneficiaryStillKills)
@@ -854,8 +968,8 @@ TEST(SchedulerSpaceShared, LongLivedGrowthCanBeParkedRepeatedly)
     constexpr std::array<ResourceCost, 4> releases{200, 300, 400, 500};
     for (size_t round = 0; round < releases.size(); ++round)
     {
-        releaser.decreaseAsync(releases[round]); // Retries and re-parks the blocked heavy growth.
-        releaser.waitSynced();
+        releaser->decreaseAsync(releases[round]); // Retries and re-parks the blocked heavy growth.
+        releaser->waitSynced();
         ASSERT_EQ(heavy.killCount(), 0u) << "round=" << round;
 
         ManualAllocation fitting(queue, fmt::format("fitting_{}", round), 100);
@@ -864,10 +978,12 @@ TEST(SchedulerSpaceShared, LongLivedGrowthCanBeParkedRepeatedly)
     }
 
     EXPECT_EQ(heavy.size(), 6000);
-    EXPECT_EQ(releaser.size(), 1600);
+    EXPECT_EQ(releaser->size(), 1600);
 
-    /// Removing the last beneficiary exhausts suspension. The impossible growth must then reach
+    /// Every other productive allocation must finish before suspension is exhausted. The impossible
+    /// growth must then reach
     /// the existing last-resort eviction path.
+    releaser.reset();
     anchor.reset();
     heavy.waitKills(1);
     EXPECT_EQ(heavy.killCount(), 1u);
@@ -948,7 +1064,7 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         };
 
         ManualAllocation heavy(queue, "heavy", 5000);
-        ManualAllocation releaser(queue, "releaser", 3000);
+        auto releaser = std::make_unique<ManualAllocation>(queue, "releaser", 3000);
 
         std::promise<void> entered;
         std::promise<void> release;
@@ -976,7 +1092,7 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
 
         auto totalAllocated = [&]()
         {
-            ResourceCost total = heavy.size() + releaser.size() + anchor->size();
+            ResourceCost total = heavy.size() + releaser->size() + anchor->size();
             for (auto & query : live_queries)
                 total += query.allocation->size();
             return total;
@@ -1006,9 +1122,9 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
             if (round % 4 == 0)
             {
                 ResourceCost release_size = randomBetween(50, 200);
-                release_size = std::min(release_size, releaser.size());
-                releaser.decreaseAsync(release_size);
-                releaser.waitSynced();
+                release_size = std::min(release_size, releaser->size());
+                releaser->decreaseAsync(release_size);
+                releaser->waitSynced();
                 ++progress_events;
                 ++release_retry_checkpoints;
                 bytes_released += release_size;
@@ -1136,6 +1252,9 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
         queries_completed += live_queries.size();
         release_retry_checkpoints += live_queries.size();
         live_queries.clear();
+        bytes_released += releaser->size();
+        ++release_retry_checkpoints;
+        releaser.reset();
         anchor.reset();
 
         /// Once every beneficiary finishes, the heavy request is still impossible and must reach
