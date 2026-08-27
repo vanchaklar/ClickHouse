@@ -68,7 +68,13 @@ void AllocationQueue::insertAllocation(ResourceAllocation & allocation, Resource
         pending_allocations.push_back(allocation);
         pending_allocations_size += initial_size;
         SCHED_DBG("{} -- insert(id={}, size={}, pending={})", basename, allocation.unique_id, initial_size, pending_allocations.size());
-        if (&allocation == &*pending_allocations.begin() && increasing_allocations.empty()) // Only if it should be processed next
+        /// A suspended running increase remains linked in `increasing_allocations`, but it is
+        /// ineligible. Wake the scheduler when this pending allocation is now the first visible
+        /// request; otherwise it can wait forever for an unrelated event.
+        const bool has_eligible_running_increase = std::any_of(
+            increasing_allocations.begin(), increasing_allocations.end(),
+            [](const ResourceAllocation & running) { return !running.isIncreaseSuspended(); });
+        if (&allocation == &*pending_allocations.begin() && !has_eligible_running_increase)
             scheduleActivation();
     }
     else // Zero-cost allocations are not blocked - enqueue into running allocations directly
