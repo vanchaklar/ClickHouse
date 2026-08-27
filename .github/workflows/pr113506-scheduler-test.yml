@@ -103,7 +103,7 @@ jobs:
                   Core/Settings.cpp
                   "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
               )
-              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare)
+              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
               target_link_libraries(
                   unit_test_space_shared_scheduler PRIVATE
                   ch_contrib::gmock_all
