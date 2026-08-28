@@ -83,11 +83,28 @@ jobs:
           if (ENABLE_TESTS)
               file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
           #include <gtest/gtest.h>
+          #include <Columns/IColumn_fwd.h>
           #include <Common/ThreadStatus.h>
+          #include <Processors/IProcessor.h>
 
           namespace DB
           {
           void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
+
+          /// The focused runner deliberately does not link the complete processor library.
+          /// These definitions are sufficient for the port-free spill probe used by the scheduler tests.
+          IProcessor::IProcessor() = default;
+          IProcessor::Status IProcessor::prepare() { return Status::Finished; }
+          void IProcessor::work() {}
+          int IProcessor::schedule() { return -1; }
+          #if defined(OS_LINUX) || defined(OS_DARWIN)
+          std::tuple<int, uint32_t, Int64> IProcessor::scheduleForEvent() { return {-1, 0, -1}; }
+          #endif
+          IProcessor::PipelineUpdate IProcessor::updatePipeline() { return {}; }
+          void IProcessor::cancel(CancelReason) noexcept {}
+
+          void intrusive_ptr_add_ref(const IColumn *) {}
+          void intrusive_ptr_release(const IColumn *) {}
           }
 
           int main(int argc, char ** argv)
