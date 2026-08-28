@@ -364,10 +364,13 @@ TEST(SchedulerSpaceSharedDesired, ConcurrentFittingArrivalsAllProgress)
     r.registerResource();
 
     ManualAllocation heavy(queue, "heavy", 8000);
+    heavy.protectAfterPressureRounds(2);
     heavy.increaseAsync(5000);
+    heavy.waitPressureCount(1);
 
     constexpr size_t query_count = 8;
     std::barrier<> start(query_count + 1);
+    std::barrier<> submitted(query_count + 1);
     std::vector<std::unique_ptr<ManualAllocation>> fitting(query_count);
     std::vector<std::thread> threads;
     threads.reserve(query_count);
@@ -379,11 +382,14 @@ TEST(SchedulerSpaceSharedDesired, ConcurrentFittingArrivalsAllProgress)
             start.arrive_and_wait();
             fitting[index] = std::make_unique<ManualAllocation>(
                 queue, fmt::format("fitting_{}", index), 250, false);
+            submitted.arrive_and_wait();
             fitting[index]->waitSynced();
         });
     }
 
     start.arrive_and_wait();
+    submitted.arrive_and_wait();
+    heavy.recoveryCheckpoint();
     for (auto & thread : threads)
         thread.join();
 
