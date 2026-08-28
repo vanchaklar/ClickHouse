@@ -397,3 +397,44 @@ TEST(SchedulerSpaceSharedDesired, ConcurrentFittingArrivalsAllProgress)
         EXPECT_EQ(allocation->size(), 250);
     EXPECT_EQ(heavy.killCount(), 0u);
 }
+
+
+/// Suction work is node-owned state. Detaching the limit after suction is queued must cancel the
+/// callback; an event retaining a raw AllocationLimit pointer will be detected as a child-process
+/// crash (and as a precise use-after-free under ASan).
+TEST(SchedulerSpaceSharedDesired, DetachingLimitCancelsQueuedSuction)
+{
+    ASSERT_EXIT(
+        {
+            SpaceSharedTest t;
+            SpaceSharedResourceHolder r(t);
+            r.addLimit("/", 10000);
+            AllocationQueue * queue = r.addQueue("/queue");
+            r.registerResource();
+
+            /// The child exits without normal object teardown, so this allocation deliberately
+            /// remains alive while the scheduler destroys its owning subtree.
+            auto * heavy = new ManualAllocation(queue, "heavy", 8000);
+            heavy->protectAfterPressureRounds(1);
+            heavy->runOnNextPressure([&]
+            {
+                /// This event is enqueued before the suction event created by the same pressure
+                /// turn. It removes and destroys the limit; later suction must therefore be
+                /// cancelled rather than dereference the destroyed node.
+                t.scheduler.event_queue.enqueue([&]
+                {
+                    t.scheduler.removeChild(r.root_node.get());
+                    r.root_node.reset();
+                });
+            });
+
+            heavy->increaseAsync(5000);
+            if (!heavy->waitPressureCountFor(1, std::chrono::seconds(5)))
+                std::_Exit(2);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            std::_Exit(0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}

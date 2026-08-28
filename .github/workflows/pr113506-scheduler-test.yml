@@ -199,7 +199,14 @@ jobs:
                   print(suite + line.strip().split()[0])
           '
           )
-          tests+=("SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation")
+          tests+=(
+            "SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation"
+            "SchedulerSpaceShared.KillDuringPendingIncrease"
+            "SchedulerSpaceShared.NestedLimitsTrackTheSameBeneficiaryIndependently"
+            "SchedulerSpaceShared.RepeatedSuspensionInjectsExternalPriority"
+            "SchedulerSpaceShared.EarlyRecoveryCompletionCannotBeLost"
+            "SchedulerSpaceShared.RunnableProcessorClaimsForcedSpillEpoch"
+          )
 
           failed=0
           for test_name in "${tests[@]}"; do
