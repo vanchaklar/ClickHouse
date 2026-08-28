@@ -3,7 +3,133 @@
 /// This translation unit deliberately includes the production scheduler tests so it can reuse their
 /// deterministic ManualAllocation harness without copying it. It is built only by the isolated PR
 /// workflow; it is not part of the ClickHouse source target or the PR branch.
+#define ManualAllocation UpstreamManualAllocation
 #include <Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp>
+#undef ManualAllocation
+
+/// CI-only compatibility helper. Upstream master has the same deterministic allocation driver but
+/// not the non-blocking admission constructor or kill wait used by these cross-version scenarios.
+struct ManualAllocation : public ResourceAllocation
+{
+    ManualAllocation(AllocationQueue * queue_, const String & name_, ResourceCost initial_size, bool wait_for_admission = true)
+        : ResourceAllocation(*queue_, name_)
+    {
+        if (initial_size > 0)
+            increase_enqueued = true;
+        queue.insertAllocation(*this, initial_size); // scheduler thread may call back after this
+        if (initial_size > 0 && wait_for_admission) // Block until admitted, like MemoryReservation with reserve_memory > 0
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [this] { return !increase_enqueued || fail_reason; });
+            if (fail_reason)
+                std::rethrow_exception(fail_reason);
+        }
+    }
+
+    ~ManualAllocation() override
+    {
+        {
+            std::unique_lock lock(mutex);
+            if (removed || fail_reason)
+                return;
+        }
+        queue.removeAllocation(*this);
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return removed || fail_reason; });
+    }
+
+    /// Requests an increase without waiting for the approval.
+    void increaseAsync(ResourceCost size)
+    {
+        {
+            std::unique_lock lock(mutex);
+            increase_enqueued = true;
+        }
+        queue.increaseAllocation(*this, size);
+    }
+
+    /// Requests a decrease without waiting for the approval.
+    void decreaseAsync(ResourceCost size)
+    {
+        {
+            std::unique_lock lock(mutex);
+            decrease_enqueued = true;
+        }
+        queue.decreaseAllocation(*this, size);
+    }
+
+    /// Waits until all requests issued so far are approved.
+    void waitSynced()
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this] { return fail_reason || (!increase_enqueued && !decrease_enqueued); });
+        if (fail_reason)
+            std::rethrow_exception(fail_reason);
+    }
+
+    size_t killCount()
+    {
+        std::unique_lock lock(mutex);
+        return kills;
+    }
+
+    void waitKills(size_t count)
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [&] { return kills >= count; });
+    }
+
+    ResourceCost size()
+    {
+        std::unique_lock lock(mutex);
+        return allocated_size;
+    }
+
+private: // interaction with the scheduler thread
+    void increaseApproved(const IncreaseRequest & increase) override
+    {
+        std::unique_lock lock(mutex);
+        allocated_size += increase.size;
+        increase_enqueued = false;
+        cv.notify_all();
+    }
+
+    void decreaseApproved(const DecreaseRequest & decrease) override
+    {
+        std::unique_lock lock(mutex);
+        allocated_size -= decrease.size;
+        decrease_enqueued = false;
+        if (decrease.removing_allocation)
+            removed = true;
+        cv.notify_all();
+    }
+
+    void allocationFailed(const std::exception_ptr & reason) override
+    {
+        std::unique_lock lock(mutex);
+        fail_reason = reason;
+        removed = true;
+        allocated_size = 0;
+        cv.notify_all();
+    }
+
+    void killAllocation(const std::exception_ptr &) override
+    {
+        std::unique_lock lock(mutex);
+        ++kills;
+        cv.notify_all();
+    }
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::exception_ptr fail_reason;
+    bool increase_enqueued = false;
+    bool decrease_enqueued = false;
+    bool removed = false;
+    size_t kills = 0;
+    ResourceCost allocated_size = 0;
+};
+
 
 /// A late pending request that fits must wake an idle queue even when older pending requests were
 /// parked earlier in the same suspension round.
