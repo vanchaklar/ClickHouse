@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - ci/pr113506-scheduler-test
+    paths:
+      - 'src/Common/Scheduler/**'
+      - 'src/Common/MemorySpillScheduler.*'
+      - '.github/ci/pr113506_desired_scheduler_tests.cpp'
+      - '.github/workflows/pr113506-scheduler-test.yml'
   workflow_dispatch:
     inputs:
       run_stress:
@@ -11,6 +16,10 @@ on:
         required: false
         default: false
         type: boolean
+
+concurrency:
+  group: pr113506-focused-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -30,29 +39,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          submodules: recursive
+          submodules: false
+          show-progress: false
 
       - name: Restore focused test binary
         id: focused-binary-cache
         uses: actions/cache/restore@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ github.sha }}-harness-v4
-
-      - name: Disable unavailable runner package repositories
-        run: |
-          for source in /etc/apt/sources.list.d/*; do
-            if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
-              sudo mv "$source" "$source.disabled"
-            fi
-          done
-
-      - name: Ensure benchmark timer
-        run: |
-          if [[ ! -x /usr/bin/time ]]; then
-            sudo apt-get update
-            sudo apt-get install -y time
-          fi
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/Settings.*', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v5
 
       - name: Restore compiler cache
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -64,15 +59,34 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
-      - name: Install build tools
+      - name: Prepare shallow submodules and build tools
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build wget
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
-          echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
-          sudo apt-get update
-          sudo apt-get install -y clang-21 lld-21
+          set -euo pipefail
+
+          (
+            git submodule sync --recursive
+            git submodule update --init --recursive --depth 1 --jobs 8
+          ) &
+          submodules_pid=$!
+
+          (
+            for source in /etc/apt/sources.list.d/*; do
+              if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+                sudo mv "$source" "$source.disabled"
+              fi
+            done
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build time wget
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+            sudo apt-get update
+            sudo apt-get install -y clang-21 lld-21
+          ) &
+          tools_pid=$!
+
+          wait "$submodules_pid"
+          wait "$tools_pid"
           clang++-21 --version
           cmake --version
           nasm --version
@@ -171,7 +185,7 @@ jobs:
           CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
           CCACHE_MAXSIZE: 2G
         run: |
-          cmake --build build --target unit_test_space_shared_scheduler --parallel 4
+          cmake --build build --target unit_test_space_shared_scheduler --parallel "$(nproc)"
           ccache --show-stats
 
       - name: Save compiler cache
@@ -181,7 +195,22 @@ jobs:
           path: ${{ runner.temp }}/pr113506-ccache
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
 
+      - name: Run directly affected deterministic tests
+        run: |
+          timeout --signal=KILL 60s \
+            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch' \
+            --gtest_print_time=1
+
+      - name: Run focused scheduler tests
+        run: |
+          timeout --signal=KILL 120s \
+            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+            --gtest_filter='SchedulerSpaceShared.*' \
+            --gtest_print_time=1
+
       - name: Run aspirational scheduler scenarios independently
+        id: aspirational
         run: |
           result_dir="$RUNNER_TEMP/pr113506-desired-scenarios"
           mkdir -p "$result_dir"
@@ -205,15 +234,6 @@ jobs:
                   print(suite + line.strip().split()[0])
           '
           )
-          tests+=(
-            "SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation"
-            "SchedulerSpaceShared.KillDuringPendingIncrease"
-            "SchedulerSpaceShared.NestedLimitsTrackTheSameBeneficiaryIndependently"
-            "SchedulerSpaceShared.RepeatedSuspensionInjectsExternalPriority"
-            "SchedulerSpaceShared.EarlyRecoveryCompletionCannotBeLost"
-            "SchedulerSpaceShared.RunnableProcessorClaimsForcedSpillEpoch"
-          )
-
           failed=0
           for test_name in "${tests[@]}"; do
             log="$result_dir/${test_name}.log"
@@ -258,21 +278,13 @@ jobs:
           ((failed == 0))
 
       - name: Upload aspirational scenario evidence
-        if: always()
+        if: always() && steps.aspirational.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: pr113506-desired-scheduler-scenarios
           path: ${{ runner.temp }}/pr113506-desired-scenarios
           if-no-files-found: error
           retention-days: 14
-
-      - name: Run focused scheduler tests
-        if: always()
-        run: |
-          timeout --signal=KILL 120s \
-            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.*' \
-            --gtest_print_time=1
 
       - name: Save verified focused test binary
         if: always() && steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -282,7 +294,8 @@ jobs:
           key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
 
       - name: Stress randomized scheduler tests for three hours
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_stress }}
+        id: stress
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_stress }}
         timeout-minutes: 190
         run: |
           duration_seconds=$((3 * 60 * 60))
@@ -386,7 +399,7 @@ jobs:
           PY
 
       - name: Upload scheduler stress metrics
-        if: always()
+        if: always() && steps.stress.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: pr113506-scheduler-stress-metrics
