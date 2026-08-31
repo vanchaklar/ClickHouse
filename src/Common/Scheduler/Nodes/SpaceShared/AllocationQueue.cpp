@@ -477,6 +477,42 @@ void AllocationQueue::processActivation()
     {
         std::lock_guard lock(mutex);
 
+        /// Experiment: a fitting beneficiary can start its own spill episode after it
+        /// becomes blocked. Consume that completion even when another allocation owns the older
+        /// suspended-growth episode.
+        auto recovered_beneficiary = std::find_if(
+            increasing_allocations.begin(), increasing_allocations.end(), [this](const ResourceAllocation & allocation)
+            {
+                return &allocation != suspended_growth && allocation.memory_growth_recovery_pending;
+            });
+        if (recovered_beneficiary != increasing_allocations.end())
+        {
+            ResourceAllocation & recovering = *recovered_beneficiary;
+            recovering.memory_growth_recovery_pending = false;
+            recovering.memory_growth_suspended = false;
+            recovering.memory_growth_suspension_attempted = false;
+
+            const ResourceCost old_size = recovering.increase.size;
+            const ResourceCost reconciled_size = recovering.reconcilePendingIncrease(recovering.allocated, old_size);
+            if (reconciled_size != old_size)
+            {
+                increasing_allocations.erase(increasing_allocations.iterator_to(recovering));
+                running_allocations.erase(running_allocations.iterator_to(recovering));
+                recovering.increase.size = reconciled_size;
+                recovering.fair_key = recovering.allocated + reconciled_size;
+                running_allocations.insert(recovering);
+
+                if (reconciled_size > 0)
+                    increasing_allocations.insert(recovering);
+                else
+                {
+                    recovering.onGrowthPressureResolved();
+                    recovering.increaseCancelled();
+                }
+            }
+            memory_growth_suspension_changed = true;
+        }
+
         if (suspended_growth && suspended_growth->memory_growth_recovery_pending)
         {
             suspended_growth->memory_growth_recovery_pending = false;
