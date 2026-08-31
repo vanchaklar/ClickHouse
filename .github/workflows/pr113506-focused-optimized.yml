@@ -1,0 +1,290 @@
+name: PR 113506 optimized focused scheduler validation
+
+on:
+  push:
+    branches:
+      - 'ci/pr113506-optimized-*'
+    paths:
+      - 'src/Common/Scheduler/**'
+      - 'src/Common/MemorySpillScheduler.*'
+      - '.github/ci/pr113506_desired_scheduler_tests.cpp'
+      - '.github/workflows/pr113506-focused-optimized.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: pr113506-focused-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scheduler-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h /
+
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          show-progress: false
+
+      - name: Restore focused test binary
+        id: focused-binary-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/Settings.*', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v5
+
+      - name: Restore compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+
+      - name: Prepare shallow submodules and build tools
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          (
+            git submodule sync --recursive
+            git submodule update --init --recursive --depth 1 --jobs 8
+          ) &
+          submodules_pid=$!
+
+          (
+            for source in /etc/apt/sources.list.d/*; do
+              if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+                sudo mv "$source" "$source.disabled"
+              fi
+            done
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build time wget
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+            sudo apt-get update
+            sudo apt-get install -y clang-21 lld-21
+          ) &
+          tools_pid=$!
+
+          wait "$submodules_pid"
+          wait "$tools_pid"
+          clang++-21 --version
+          cmake --version
+          nasm --version
+          ninja --version
+
+      - name: Add runner-only focused test target
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/CMakeLists.txt")
+          path.write_text(path.read_text() + r"""
+          if (ENABLE_TESTS)
+              file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
+          #include <gtest/gtest.h>
+          #include <Columns/IColumn_fwd.h>
+          #include <Common/ThreadStatus.h>
+          #include <Processors/IProcessor.h>
+
+          namespace DB
+          {
+          void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
+
+          /// The focused runner deliberately does not link the complete processor library.
+          /// These definitions are sufficient for the port-free spill probe used by the scheduler tests.
+          IProcessor::IProcessor() = default;
+          IProcessor::Status IProcessor::prepare() { return Status::Finished; }
+          void IProcessor::work() {}
+          int IProcessor::schedule() { return -1; }
+          #if defined(OS_LINUX) || defined(OS_DARWIN)
+          std::tuple<int, uint32_t, Int64> IProcessor::scheduleForEvent() { return {-1, 0, -1}; }
+          #endif
+          IProcessor::PipelineUpdate IProcessor::updatePipeline() { return {}; }
+          void IProcessor::cancel(CancelReason) noexcept {}
+
+          void intrusive_ptr_add_ref(const IColumn *) {}
+          void intrusive_ptr_release(const IColumn *) {}
+          }
+
+          int main(int argc, char ** argv)
+          {
+              testing::InitGoogleTest(&argc, argv);
+              return RUN_ALL_TESTS();
+          }
+          ]=])
+
+              clickhouse_add_executable(
+                  unit_test_space_shared_scheduler
+                  ../.github/ci/pr113506_desired_scheduler_tests.cpp
+                  Core/Settings.cpp
+                  "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
+              )
+              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
+              target_link_libraries(
+                  unit_test_space_shared_scheduler PRIVATE
+                  ch_contrib::gmock_all
+                  ch_contrib::gtest
+                  clickhouse_common_io
+                  clickhouse_common_config
+              )
+          endif()
+          """)
+          PY
+
+      - name: Configure focused build
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-21 \
+            -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_LINKER=ld.lld-21 \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EXAMPLES=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DENABLE_JEMALLOC=OFF \
+            -DENABLE_AWS_S3=OFF \
+            -DENABLE_AZURE_BLOB_STORAGE=OFF \
+            -DENABLE_HDFS=OFF \
+            -DENABLE_KAFKA=OFF \
+            -DENABLE_NATS=OFF \
+            -DENABLE_RABBITMQ=OFF \
+            -DENABLE_GRPC=OFF \
+            -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF
+
+      - name: Build focused scheduler test
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          cmake --build build --target unit_test_space_shared_scheduler --parallel "$(nproc)"
+          ccache --show-stats
+
+      - name: Save compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Run aspirational scheduler scenarios independently
+        run: |
+          result_dir="$RUNNER_TEMP/pr113506-desired-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceSharedDesired.*:SchedulerSpaceSharedFixProbe.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+          tests+=(
+            "SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation"
+            "SchedulerSpaceShared.KillDuringPendingIncrease"
+            "SchedulerSpaceShared.NestedLimitsTrackTheSameBeneficiaryIndependently"
+            "SchedulerSpaceShared.RepeatedSuspensionInjectsExternalPriority"
+            "SchedulerSpaceShared.EarlyRecoveryCompletionCannotBeLost"
+            "SchedulerSpaceShared.RunnableProcessorClaimsForcedSpillEpoch"
+          )
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          {
+            echo "## Intended scheduler behavior scenarios"
+            echo
+            echo "| Scenario | Result | Time (ms) |"
+            echo "|---|---:|---:|"
+            tail -n +2 "$results_csv" | while IFS=, read -r test_name result exit_code elapsed_ms; do
+              echo "| \`$test_name\` | $result | $elapsed_ms |"
+            done
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "desired_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Upload aspirational scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-desired-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-desired-scenarios
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Run focused scheduler tests
+        if: always()
+        run: |
+          timeout --signal=KILL 120s \
+            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+            --gtest_filter='SchedulerSpaceShared.*:SchedulerSpaceSharedFixProbe.*' \
+            --gtest_print_time=1
+
+      - name: Save verified focused test binary
+        if: always() && steps.focused-binary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
