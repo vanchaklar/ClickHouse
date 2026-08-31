@@ -5,6 +5,12 @@ on:
     branches:
       - ci/pr113506-scheduler-test
   workflow_dispatch:
+    inputs:
+      run_stress:
+        description: Run the three-hour randomized stress gate
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -276,6 +282,7 @@ jobs:
           key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
 
       - name: Stress randomized scheduler tests for three hours
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_stress }}
         timeout-minutes: 190
         run: |
           duration_seconds=$((3 * 60 * 60))

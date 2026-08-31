@@ -25,7 +25,6 @@ public:
     struct ForcedSpillRequest
     {
         UInt64 epoch = 0;
-        bool inject_priority = false;
     };
 
     struct ForcedSpillResult
@@ -41,29 +40,34 @@ public:
     void registerProcessor(IProcessor * processor);
     void remove(IProcessor * processor);
 
-    /// Inject query-level memory pressure from the reservation scheduler. The first pressure
-    /// round requests a forced spill. Only explicit completion of that attempt allows the second
-    /// round to inject suction priority and resolve the conflict through normal victim selection.
+    /// Start one exhaustive forced-spill pass when a query enters the eviction queue.
+    /// Repeated calls while that pass is active return the same epoch.
     ForcedSpillRequest requestForcedSpill();
     ForcedSpillResult getForcedSpillResult(UInt64 epoch) const;
     void finishMemoryPressure();
 
 private:
+    struct ProcessorState
+    {
+        ProcessorMemoryStats stats;
+        UInt64 claimed_forced_epoch = 0;
+        UInt64 completed_forced_epoch = 0;
+    };
+
     bool enable = true;
     std::mutex mutex;
     // Only trace the spillable processors, this map is not expected to be too large.
-    std::unordered_map<IProcessor *, ProcessorMemoryStats> processor_stats;
+    std::unordered_map<IProcessor *, ProcessorState> processor_states;
     IProcessor * top_processor = nullptr;
     Int64 max_reserved_memory_bytes = 0;
     std::atomic<Int64> hard_limit = -1;
 
-    /// Monotonic epochs avoid losing a spill request when a different processor observes it first.
+    /// Monotonic epochs make completion observable without coupling the reservation to a processor.
     std::atomic<UInt64> forced_spill_request_epoch = 0;
-    std::atomic<UInt64> forced_spill_claimed_epoch = 0;
     std::atomic<UInt64> forced_spill_completed_epoch = 0;
     std::atomic<ForcedSpillOutcome> forced_spill_outcome = ForcedSpillOutcome::Pending;
     std::atomic<Int64> forced_spill_reclaimed_bytes = 0;
-    std::atomic<UInt64> pressure_round = 0;
+    bool forced_spill_active = false;
 
     // When there is no need to spill, return nullptr. otherwise return top_processor;
     IProcessor * selectSpilledProcessor(

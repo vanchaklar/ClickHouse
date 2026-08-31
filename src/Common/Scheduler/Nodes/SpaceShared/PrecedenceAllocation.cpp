@@ -1,4 +1,5 @@
 #include <Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.h>
+#include <Common/Scheduler/IAllocationQueue.h>
 #include <Common/Scheduler/Debug.h>
 #include <Common/Exception.h>
 
@@ -78,25 +79,33 @@ ResourceAllocation * PrecedenceAllocation::selectAllocationToKill(IncreaseReques
     //      In either case it must never evict a strictly higher-precedence child.
     // 3. Killer is part of the victim child:
     //    - we are above the least common ancestor; propagate down, the decision is taken lower.
-    if (running_children.empty())
-        return nullptr;
-    ISpaceSharedNode & victim_child = *running_children.rbegin();
-
-    // Case 2: `&killer == increase` means the killer increase propagated through this node, so
-    // `increase_child` is the killer's branch (the scheduler processes only the top of the
-    // increasing set, hence the killer always equals our current `increase`). When the victim
-    // branch differs, this node is the least common ancestor and precedence must be respected.
-    // NOTE: a lower `info.precedence` value means higher precedence.
-    if (&killer == increase && increase_child && increase_child != &victim_child)
+    ISpaceSharedNode * killer_child = nullptr;
+    for (ISchedulerNode * node = &killer.allocation.queue; node && node->parent; node = node->parent)
     {
-        const bool victim_higher = victim_child.info.precedence < increase_child->info.precedence;
-        const bool victim_equal = victim_child.info.precedence == increase_child->info.precedence;
-        const bool killer_pending = killer.kind == IncreaseRequest::Kind::Pending;
-        if (victim_higher || (victim_equal && killer_pending))
-            return nullptr;
+        if (node->parent == this)
+        {
+            killer_child = static_cast<ISpaceSharedNode *>(node);
+            break;
+        }
     }
 
-    return victim_child.selectAllocationToKill(killer, limit, details);
+    /// Search all policy-eligible children from lowest to highest precedence. The killer branch is
+    /// derived from the hierarchy rather than the currently visible increase, because suction runs
+    /// while that increase is intentionally parked.
+    for (auto it = running_children.rbegin(); it != running_children.rend(); ++it)
+    {
+        ISpaceSharedNode & victim_child = *it;
+        if (killer_child && killer_child != &victim_child)
+        {
+            const bool victim_higher = victim_child.info.precedence < killer_child->info.precedence;
+            const bool victim_equal = victim_child.info.precedence == killer_child->info.precedence;
+            if (victim_higher || (victim_equal && killer.kind == IncreaseRequest::Kind::Pending))
+                continue;
+        }
+        if (ResourceAllocation * victim = victim_child.selectAllocationToKill(killer, limit, details))
+            return victim;
+    }
+    return nullptr;
 }
 
 void PrecedenceAllocation::approveIncrease()
@@ -142,6 +151,21 @@ bool PrecedenceAllocation::hasSuspendedIncrease() const
     });
 }
 
+ResourceAllocation * PrecedenceAllocation::getSuctionAllocation() const
+{
+    ResourceAllocation * result = nullptr;
+    for (const auto & [_, child] : children)
+    {
+        if (ResourceAllocation * candidate = child->getSuctionAllocation())
+        {
+            chassert(!result || result == candidate);
+            if (!result)
+                result = candidate;
+        }
+    }
+    return result;
+}
+
 void PrecedenceAllocation::propagateUpdate(ISpaceSharedNode & from_child, Update && update)
 {
     SCHED_DBG("{} -- propagateUpdate(from_child={}, update={})", getPath(), from_child.basename, update.toString());
@@ -170,6 +194,8 @@ void PrecedenceAllocation::propagateUpdate(ISpaceSharedNode & from_child, Update
         else
             update.resetDecrease();
     }
+    if (update.suction)
+        update.setSuction(getSuctionAllocation());
     if (parent && update)
         propagate(std::move(update));
 }
@@ -187,17 +213,24 @@ bool PrecedenceAllocation::setIncrease(ISpaceSharedNode & from_child, IncreaseRe
 
     // Update current increase request
     IncreaseRequest * old_increase = increase;
+    auto suction = std::find_if(increasing_children.begin(), increasing_children.end(), [](const ISpaceSharedNode & child)
+    {
+        return child.increase && child.increase->allocation.isSuctioned();
+    });
     auto eligible = std::find_if(increasing_children.begin(), increasing_children.end(), [](const ISpaceSharedNode & child)
     {
         return child.increase && !child.increase->allocation.isIncreaseSuspended();
     });
-    increase_child = eligible == increasing_children.end() ? nullptr : &*eligible;
+    increase_child = suction != increasing_children.end()
+        ? &*suction
+        : (eligible == increasing_children.end() ? nullptr : &*eligible);
 
     /// Suspension is an internal reclaim state, not permission to cross a workload-policy boundary.
     /// A parked branch therefore remains a barrier to strictly lower-precedence children.
     for (const auto & [_, child] : children)
     {
-        if (child->hasSuspendedIncrease()
+        if (!(detach_child && child.get() == &from_child)
+            && child->hasSuspendedIncrease()
             && (!increase_child || child->info.precedence < increase_child->info.precedence))
         {
             increase_child = nullptr;

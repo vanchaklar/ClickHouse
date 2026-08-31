@@ -1,4 +1,5 @@
 #include <Common/Scheduler/Nodes/SpaceShared/FairAllocation.h>
+#include <Common/Scheduler/IAllocationQueue.h>
 #include <Common/Scheduler/Debug.h>
 #include <Common/Exception.h>
 
@@ -81,22 +82,27 @@ ResourceAllocation * FairAllocation::selectAllocationToKill(IncreaseRequest & ki
     //    - we are above the least common ancestor of killer and victim.
     //    - propagate down, decision will be taken lower in the tree.
 
-    if (running_children.empty())
-        return nullptr;
-    ISpaceSharedNode & victim_child = *running_children.rbegin();
+    ISpaceSharedNode * killer_child = nullptr;
+    for (ISchedulerNode * node = &killer.allocation.queue; node && node->parent; node = node->parent)
+    {
+        if (node->parent == this)
+        {
+            killer_child = static_cast<ISpaceSharedNode *>(node);
+            break;
+        }
+    }
 
-    // Case 2b. Different children pending allocation never kill each other to avoid thrashing.
-    // Keep it simple for now. Otherwise, allocations from different children may keep killing each other.
-    // TODO(serxa): More sophisticated handling and tolerance rules preventing thrashing are required.
-    // These rules should take into account:
-    // - fair shares based on `limit` (expensive to compute in a hierarchy);
-    // - and accumulated unfairness in term of ResourceCost * Time (requires tracking time).
-    // - tolerance thresholds limiting the unfairness.
-    if (killer.kind == IncreaseRequest::Kind::Pending && &killer == increase && victim_child.increase != &killer)
-        return nullptr;
-
-    /// Kill the allocation from the largest child. It is the last as the set is ordered by usage.
-    return victim_child.selectAllocationToKill(killer, limit, details);
+    /// Search every child in reverse acquisition order. A protected or already-killed allocation
+    /// in the largest child must not hide an eligible victim in a later sibling.
+    for (auto it = running_children.rbegin(); it != running_children.rend(); ++it)
+    {
+        ISpaceSharedNode & victim_child = *it;
+        if (killer.kind == IncreaseRequest::Kind::Pending && killer_child && killer_child != &victim_child)
+            continue;
+        if (ResourceAllocation * victim = victim_child.selectAllocationToKill(killer, limit, details))
+            return victim;
+    }
+    return nullptr;
 }
 
 void FairAllocation::approveIncrease()
@@ -135,6 +141,21 @@ bool FairAllocation::hasSuspendedIncrease() const
     });
 }
 
+ResourceAllocation * FairAllocation::getSuctionAllocation() const
+{
+    ResourceAllocation * result = nullptr;
+    for (const auto & [_, child] : children)
+    {
+        if (ResourceAllocation * candidate = child->getSuctionAllocation())
+        {
+            chassert(!result || result == candidate);
+            if (!result)
+                result = candidate;
+        }
+    }
+    return result;
+}
+
 void FairAllocation::propagateUpdate(ISpaceSharedNode & from_child, Update && update)
 {
     SCHED_DBG("{} -- propagateUpdate(from_child={}, update={})", getPath(), from_child.basename, update.toString());
@@ -153,6 +174,8 @@ void FairAllocation::propagateUpdate(ISpaceSharedNode & from_child, Update && up
         else
             update.resetDecrease();
     }
+    if (update.suction)
+        update.setSuction(getSuctionAllocation());
     if (parent && update)
         propagate(std::move(update));
 }
@@ -168,11 +191,18 @@ bool FairAllocation::setIncrease(ISpaceSharedNode & from_child, IncreaseRequest 
     {
         return child.increase && !child.increase->allocation.isIncreaseSuspended();
     };
+    auto suction = std::find_if(increasing_children.begin(), increasing_children.end(), [](const ISpaceSharedNode & child)
+    {
+        return child.increase && child.increase->allocation.isSuctioned();
+    });
     auto increasing = std::find_if(increasing_children.begin(), increasing_children.end(), eligible);
     auto pending = std::find_if(pending_children.begin(), pending_children.end(), eligible);
-    increase_child = increasing != increasing_children.end()
-        ? &*increasing
-        : (pending != pending_children.end() ? &*pending : nullptr);
+    if (suction != increasing_children.end())
+        increase_child = &*suction;
+    else if (increasing != increasing_children.end())
+        increase_child = &*increasing;
+    else
+        increase_child = pending != pending_children.end() ? &*pending : nullptr;
     increase = increase_child ? increase_child->increase : nullptr;
     return old_increase != increase;
 }
