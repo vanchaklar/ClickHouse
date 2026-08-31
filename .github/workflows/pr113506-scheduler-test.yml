@@ -59,15 +59,34 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
+      - name: Identify submodule snapshot
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: submodule-snapshot
+        run: echo "tree=$(git rev-parse HEAD:contrib)" >>"$GITHUB_OUTPUT"
+
+      - name: Restore shallow submodules
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: submodule-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ runner.os }}-${{ runner.arch }}-pr113506-submodules-${{ steps.submodule-snapshot.outputs.tree }}-v1
+
       - name: Prepare shallow submodules and build tools
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
 
-          (
-            git submodule sync --recursive
-            git submodule update --init --recursive --depth 1 --jobs 8
-          ) &
+          if [[ '${{ steps.submodule-cache.outputs.cache-hit }}' == 'true' ]]; then
+            (true) &
+          else
+            (
+              git submodule sync --recursive
+              git submodule update --init --recursive --depth 1 --jobs 8
+            ) &
+          fi
           submodules_pid=$!
 
           (
@@ -91,6 +110,15 @@ jobs:
           cmake --version
           nasm --version
           ninja --version
+
+      - name: Save shallow submodules
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ steps.submodule-cache.outputs.cache-primary-key }}
 
       - name: Add runner-only focused test target
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
