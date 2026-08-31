@@ -203,11 +203,72 @@ jobs:
             --gtest_print_time=1
 
       - name: Run focused scheduler tests
+        id: focused
         run: |
-          timeout --signal=KILL 120s \
-            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.*' \
-            --gtest_print_time=1
+          result_dir="$RUNNER_TEMP/pr113506-focused-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceShared.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 10s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          echo "focused_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Upload focused scenario evidence
+        if: always() && steps.focused.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-focused-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-focused-scenarios
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Run aspirational scheduler scenarios independently
         id: aspirational
