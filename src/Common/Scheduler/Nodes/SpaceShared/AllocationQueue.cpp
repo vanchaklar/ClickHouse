@@ -145,7 +145,14 @@ bool AllocationQueue::trySuspendIncrease(ResourceAllocation & allocation)
         /// AllocationLimit consumes the decision only after every currently visible alternative
         /// has been considered.
         if (allocation.onGrowthPressure() == ResourceAllocation::GrowthPressureAction::Protect)
+        {
             allocation.memory_growth_suction_priority = true;
+            /// Suction is terminal for this round. Keep the request visible so the allocation
+            /// limit must either approve it or apply the existing eviction policy.
+            memory_growth_suspension_changed = true;
+            scheduleActivation();
+            return false;
+        }
         if (!suspended_growth)
             suspended_growth = &allocation;
     }
