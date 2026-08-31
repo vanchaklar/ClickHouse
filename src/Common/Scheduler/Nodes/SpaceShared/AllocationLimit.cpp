@@ -338,6 +338,9 @@ bool AllocationLimit::setIncrease(IncreaseRequest * new_increase, bool reapply_c
                 }
                 else if (!suspended_growth)
                     selectAndKill(*new_increase);
+                else if (new_increase->allocation.memory_growth_suction_priority
+                    && new_increase != suspended_growth)
+                    selectAndKill(*new_increase);
                 else if (new_increase == suspended_growth
                     && new_increase->allocation.memory_growth_suction_priority)
                     processSuction();
