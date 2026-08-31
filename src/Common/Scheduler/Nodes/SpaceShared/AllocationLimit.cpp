@@ -412,9 +412,17 @@ void AllocationLimit::selectAndKill(IncreaseRequest & killer)
     String details;
     /// Pass the productive-beneficiary boundary through the existing hierarchy without allocating
     /// a side container under memory pressure. Every policy node can search past protected work.
-    killer.allocation.memory_growth_candidate_protection_epoch = memory_growth_suspension_start_epoch;
-    allocation_to_kill = selectAllocationToKill(killer, max_allocated, details);
-    killer.allocation.memory_growth_candidate_protection_epoch = 0;
+    if (&killer == suspended_growth && memory_growth_suspension_beneficiaries == 0)
+    {
+        allocation_to_kill = &killer.allocation;
+        details = "Evicting the suspended allocation after recovery and productive alternatives were exhausted.";
+    }
+    else
+    {
+        killer.allocation.memory_growth_candidate_protection_epoch = memory_growth_suspension_start_epoch;
+        allocation_to_kill = selectAllocationToKill(killer, max_allocated, details);
+        killer.allocation.memory_growth_candidate_protection_epoch = 0;
+    }
     if (!allocation_to_kill)
         return;
 
