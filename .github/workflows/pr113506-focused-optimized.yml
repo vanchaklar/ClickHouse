@@ -24,11 +24,6 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: Free runner disk
-        run: |
-          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
-          df -h /
-
       - name: Check out PR head
         uses: actions/checkout@v4
         with:
@@ -42,6 +37,12 @@ jobs:
         with:
           path: build/src/unit_test_space_shared_scheduler
           key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/Settings.*', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v5
+
+      - name: Free runner disk
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h /
 
       - name: Restore compiler cache
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -274,13 +275,85 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Run focused scheduler tests
+      - name: Run remaining focused scheduler tests independently
         if: always()
         run: |
-          timeout --signal=KILL 120s \
-            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.*:SchedulerSpaceSharedFixProbe.*' \
-            --gtest_print_time=1
+          result_dir="$RUNNER_TEMP/pr113506-focused-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceShared.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+
+          already_run='
+          SchedulerSpaceShared.BeneficiaryBlockedOnGrowthCanEvictSuspendedAllocation
+          SchedulerSpaceShared.KillDuringPendingIncrease
+          SchedulerSpaceShared.NestedLimitsTrackTheSameBeneficiaryIndependently
+          SchedulerSpaceShared.RepeatedSuspensionInjectsExternalPriority
+          SchedulerSpaceShared.EarlyRecoveryCompletionCannotBeLost
+          SchedulerSpaceShared.RunnableProcessorClaimsForcedSpillEpoch
+          '
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            if grep -Fxq "$test_name" <<<"$already_run"; then
+              continue
+            fi
+
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          ((failed == 0))
+
+      - name: Upload focused scheduler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-focused-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-focused-scenarios
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Save verified focused test binary
         if: always() && steps.focused-binary-cache.outputs.cache-hit != 'true'
