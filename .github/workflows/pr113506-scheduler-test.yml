@@ -199,7 +199,7 @@ jobs:
         run: |
           timeout --signal=KILL 60s \
             stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch' \
+            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy' \
             --gtest_print_time=1
 
       - name: Run focused scheduler tests
