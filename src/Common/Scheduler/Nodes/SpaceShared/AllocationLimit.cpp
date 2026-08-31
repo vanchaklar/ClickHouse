@@ -294,6 +294,18 @@ bool AllocationLimit::setIncrease(IncreaseRequest * new_increase, bool reapply_c
                 /// The child can then expose other work hidden behind running-query growth. Memory releases
                 /// retry the parked growth, so independent work can continue while pressure drains. If
                 /// nothing can make progress, the existing kill policy remains the fallback.
+                /// Experiment: once admitted fitting work becomes blocked, end the recovery
+                /// episode and let its request enter the unchanged eviction policy.
+                if (suspended_growth
+                    && new_increase != suspended_growth
+                    && new_increase->kind == IncreaseRequest::Kind::Regular)
+                {
+                    clearMemoryGrowthSuspension();
+                    selectAndKill(*new_increase);
+                    increase = nullptr;
+                    return increase != old_increase;
+                }
+
                 const bool retrying_suspended_owner = new_increase == suspended_growth;
                 bool suspended = false;
                 if (!suspended_growth)
