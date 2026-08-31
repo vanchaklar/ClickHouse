@@ -53,6 +53,8 @@ private:
     {
         ProcessorMemoryStats stats;
         UInt64 observed_forced_epoch = 0;
+        UInt64 claimed_forced_epoch = 0;
+        UInt64 completed_forced_epoch = 0;
     };
 
     bool enable = true;
