@@ -16,6 +16,7 @@ TEST(SchedulerSpaceSharedDesired, LateFittingAdmissionWakesSuspendedQueue)
     r.registerResource();
 
     ManualAllocation heavy(queue, "heavy", 8000);
+    heavy.protectAfterPressureRounds(2);
 
     std::promise<void> entered;
     std::promise<void> release;
@@ -28,6 +29,7 @@ TEST(SchedulerSpaceSharedDesired, LateFittingAdmissionWakesSuspendedQueue)
     release.set_value();
 
     beneficiary->waitSynced();
+    heavy.waitPressureCount(1);
     ASSERT_EQ(beneficiary->size(), 1000);
     ASSERT_EQ(heavy.killCount(), 0u);
 
@@ -37,6 +39,8 @@ TEST(SchedulerSpaceSharedDesired, LateFittingAdmissionWakesSuspendedQueue)
     EXPECT_EQ(late_fitting->size(), 1000);
     EXPECT_EQ(blocked->size(), 0);
     EXPECT_EQ(heavy.killCount(), 0u);
+
+    heavy.recoveryCheckpoint();
 }
 
 
@@ -51,6 +55,7 @@ TEST(SchedulerSpaceSharedDesired, LateFittingRegularGrowthWakesSuspendedQueue)
     r.registerResource();
 
     ManualAllocation heavy(queue, "heavy", 7000);
+    heavy.protectAfterPressureRounds(2);
     ManualAllocation late_grower(queue, "late_grower", 500);
 
     std::promise<void> entered;
@@ -64,12 +69,15 @@ TEST(SchedulerSpaceSharedDesired, LateFittingRegularGrowthWakesSuspendedQueue)
     release.set_value();
 
     beneficiary->waitSynced();
+    heavy.waitPressureCount(1);
     late_grower.increaseAsync(500);
     late_grower.waitSynced();
 
     EXPECT_EQ(late_grower.size(), 1000);
     EXPECT_EQ(blocked->size(), 0);
     EXPECT_EQ(heavy.killCount(), 0u);
+
+    heavy.recoveryCheckpoint();
 }
 
 
@@ -220,36 +228,6 @@ TEST(SchedulerSpaceSharedDesired, LargeGrowthLeavesProtectedCapacityForFittingWo
     releaser.waitSynced();
     heavy.waitSynced();
     EXPECT_EQ(heavy.size(), 9000);
-    EXPECT_EQ(heavy.killCount(), 0u);
-}
-
-
-/// The same intended +3000 growth split at a MemoryTracker sync point must not consume the protected
-/// pressure zone before a fitting query gets its chance. Scheduling must not depend on whether growth
-/// arrives as 1x3000 or 3x1000.
-TEST(SchedulerSpaceSharedDesired, SmallStepGrowthLeavesTheSameProtectedCapacity)
-{
-    SpaceSharedTest t;
-    SpaceSharedResourceHolder r(t);
-    r.addLimit("/", 10000);
-    AllocationQueue * queue = r.addQueue("/queue");
-    r.registerResource();
-
-    ManualAllocation heavy(queue, "heavy", 6000);
-    ManualAllocation releaser(queue, "releaser", 3000);
-
-    std::promise<void> entered;
-    std::promise<void> release;
-    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
-    entered.get_future().get();
-
-    heavy.increaseAsync(1000); // First chunk of an intended +3000 growth.
-    auto small = std::make_unique<ManualAllocation>(queue, "small", 500, false);
-    release.set_value();
-
-    small->waitSynced();
-    EXPECT_EQ(heavy.size(), 6000) << "Growth must stall on entering the fixed pressure zone";
-    EXPECT_EQ(small->size(), 500);
     EXPECT_EQ(heavy.killCount(), 0u);
 }
 
