@@ -7,6 +7,10 @@ on:
     paths:
       - 'src/Common/Scheduler/**'
       - 'src/Common/MemorySpillScheduler.*'
+      - 'src/Core/ServerSettings.*'
+      - 'src/Core/Settings.*'
+      - 'src/Core/SettingsChangesHistory.*'
+      - 'src/Interpreters/ProcessList.cpp'
       - '.github/ci/pr113506_desired_scheduler_tests.cpp'
       - '.github/workflows/pr113506-scheduler-test.yml'
   workflow_dispatch:
@@ -227,7 +231,7 @@ jobs:
         run: |
           timeout --signal=KILL 60s \
             stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy' \
+            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy:SchedulerSpaceShared.EvictionProtectionIsLastFallback:SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy:SchedulerSpaceShared.SuctionReservationCapsProtectedGrowth' \
             --gtest_print_time=1
 
       - name: Run focused scheduler tests
