@@ -248,10 +248,41 @@ jobs:
 
       - name: Run directly affected deterministic tests
         run: |
-          timeout --signal=KILL 60s \
-            stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceSharedDesired.DiagnosePendingAllocationsRunWhileBlockedGrowthIsSuspended' \
-            --gtest_print_time=1
+          tests=(
+            SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended
+            SchedulerSpaceShared.SuctionEvictsOneVictimAtATime
+            SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease
+            SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit
+            SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction
+            SchedulerSpaceShared.SpillCompletionEntersSuction
+            SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch
+            SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy
+            SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy
+            SchedulerSpaceShared.EvictionProtectionIsLastFallback
+            SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy
+            SchedulerSpaceShared.SuctionMaxAllocationEvictsAfterSpill
+            SchedulerSpaceShared.SuctionEligibleAllocationSkipsForcedSpill
+            SchedulerSpaceShared.SpillStopsWhenAllocationBecomesSuctionEligible
+            SchedulerSpaceShared.TopLevelSuctionUsesReservedMemory
+          )
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$RUNNER_TEMP/direct-${test_name}.log"
+            if timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" --gtest_print_time=1 >"$log" 2>&1
+            then
+              echo "$test_name PASS"
+            else
+              status=$?
+              echo "$test_name FAIL exit=$status"
+              failed=$((failed + 1))
+            fi
+          done
+
+          echo "direct_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
 
       - name: Run focused scheduler tests
         id: focused

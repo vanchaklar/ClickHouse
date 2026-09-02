@@ -20,7 +20,9 @@ TEST(SchedulerSpaceSharedDesired, DiagnosePendingAllocationsRunWhileBlockedGrowt
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    auto heavy = std::make_unique<ManualAllocation>(queue, "heavy", 8000);
+    ResourceAllocation::MemoryPressurePolicy spill_before_suction;
+    spill_before_suction.suction_max_allocation_bytes = 1;
+    auto heavy = std::make_unique<ManualAllocation>(queue, "heavy", 8000, true, spill_before_suction);
     heavy->protectAfterPressureRounds(2);
 
     std::promise<void> entered;
