@@ -51,7 +51,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/Settings.*', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v5
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v6
 
       - name: Restore compiler cache
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -217,7 +217,7 @@ jobs:
           CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
           CCACHE_MAXSIZE: 2G
         run: |
-          cmake --build build --target unit_test_space_shared_scheduler --parallel "$(nproc)"
+          cmake --build build --target unit_test_space_shared_scheduler
           ccache --show-stats
 
       - name: Save compiler cache
@@ -231,7 +231,7 @@ jobs:
         run: |
           timeout --signal=KILL 60s \
             stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
-            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy:SchedulerSpaceShared.EvictionProtectionIsLastFallback:SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy:SchedulerSpaceShared.SuctionReservationCapsProtectedGrowth' \
+            --gtest_filter='SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended:SchedulerSpaceShared.SuctionEvictsOneVictimAtATime:SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease:SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit:SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction:SchedulerSpaceShared.SpillCompletionEntersSuction:SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy:SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy:SchedulerSpaceShared.EvictionProtectionIsLastFallback:SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy:SchedulerSpaceShared.SuctionMaxAllocationEvictsAfterSpill:SchedulerSpaceShared.SuctionEligibleAllocationSkipsForcedSpill:SchedulerSpaceShared.SpillStopsWhenAllocationBecomesSuctionEligible:SchedulerSpaceShared.TopLevelSuctionUsesReservedMemory' \
             --gtest_print_time=1
 
       - name: Run focused scheduler tests
