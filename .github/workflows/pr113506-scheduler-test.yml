@@ -1,5 +1,7 @@
 name: PR 113506 scheduler test
 
+# Source and harness blobs define the focused binary cache; superseded runs are cancelled per branch.
+
 on:
   push:
     branches:
