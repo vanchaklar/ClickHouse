@@ -277,6 +277,7 @@ jobs:
             else
               status=$?
               echo "$test_name FAIL exit=$status"
+              sed -n '1,120p' "$log"
               failed=$((failed + 1))
             fi
           done
