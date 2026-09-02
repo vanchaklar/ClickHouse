@@ -5,6 +5,51 @@
 /// workflow; it is not part of the ClickHouse source target or the PR branch.
 #include <Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp>
 
+TEST(SchedulerSpaceSharedDesired, DiagnosePendingAllocationsRunWhileBlockedGrowthIsSuspended)
+{
+    auto require = [](bool condition, const char * checkpoint)
+    {
+        std::cerr << "checkpoint: " << checkpoint << "=" << condition << std::endl;
+        if (!condition)
+            std::abort();
+    };
+
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    auto heavy = std::make_unique<ManualAllocation>(queue, "heavy", 8000);
+    heavy->protectAfterPressureRounds(2);
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+    entered.get_future().get();
+
+    heavy->increaseAsync(5000);
+    auto small = std::make_unique<ManualAllocation>(queue, "small", 1000, false);
+    auto next_small = std::make_unique<ManualAllocation>(queue, "next_small", 1000, false);
+    release.set_value();
+
+    require(small->waitSyncedFor(std::chrono::seconds(5)), "small admitted");
+    require(next_small->waitSyncedFor(std::chrono::seconds(5)), "next_small admitted");
+    require(heavy->waitPressureCountFor(1, std::chrono::seconds(5)), "heavy entered spill");
+
+    std::cerr << "checkpoint: removing small" << std::endl;
+    small.reset();
+    std::cerr << "checkpoint: removed small" << std::endl;
+    next_small.reset();
+    std::cerr << "checkpoint: removed next_small" << std::endl;
+
+    heavy->recoveryCheckpoint();
+    require(heavy->waitKillsFor(1, std::chrono::seconds(5)), "heavy killed after suction");
+    std::cerr << "checkpoint: removing heavy" << std::endl;
+    heavy.reset();
+    std::cerr << "checkpoint: removed heavy" << std::endl;
+}
+
 /// A late pending request that fits must wake an idle queue even when older pending requests were
 /// parked earlier in the same suspension round.
 TEST(SchedulerSpaceSharedDesired, LateFittingAdmissionWakesSuspendedQueue)
