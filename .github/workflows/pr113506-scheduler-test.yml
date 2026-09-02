@@ -32,8 +32,21 @@ permissions:
 
 jobs:
   scheduler-test:
+    name: scheduler-test (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: debug
+            sanitize: ''
+          - mode: asan-ubsan
+            sanitize: address,undefined
+          - mode: tsan
+            sanitize: thread
+          - mode: msan
+            sanitize: memory
 
     steps:
       - name: Free runner disk
@@ -53,7 +66,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v6
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v6
 
       - name: Restore compiler cache
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -61,9 +74,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/pr113506-ccache
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-ccache-
 
       - name: Identify submodule snapshot
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -196,6 +209,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=clang-21 \
             -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DSANITIZE='${{ matrix.sanitize }}' \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_LINKER=ld.lld-21 \
@@ -348,7 +362,7 @@ jobs:
         if: always() && steps.focused.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-focused-scheduler-scenarios
+          name: pr113506-${{ matrix.mode }}-focused-scheduler-scenarios
           path: ${{ runner.temp }}/pr113506-focused-scenarios
           if-no-files-found: error
           retention-days: 14
@@ -425,7 +439,7 @@ jobs:
         if: always() && steps.aspirational.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-desired-scheduler-scenarios
+          name: pr113506-${{ matrix.mode }}-desired-scheduler-scenarios
           path: ${{ runner.temp }}/pr113506-desired-scenarios
           if-no-files-found: error
           retention-days: 14
@@ -439,7 +453,7 @@ jobs:
 
       - name: Stress randomized scheduler tests for three hours
         id: stress
-        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_stress }}
+        if: ${{ success() && matrix.mode == 'debug' && github.event_name == 'workflow_dispatch' && inputs.run_stress }}
         timeout-minutes: 190
         run: |
           duration_seconds=$((3 * 60 * 60))
@@ -546,7 +560,7 @@ jobs:
         if: always() && steps.stress.outcome != 'skipped'
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-scheduler-stress-metrics
+          name: pr113506-${{ matrix.mode }}-scheduler-stress-metrics
           path: ${{ runner.temp }}/pr113506-scheduler-stress-*
           if-no-files-found: warn
           retention-days: 14
