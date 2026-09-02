@@ -219,7 +219,24 @@ jobs:
           CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
           CCACHE_MAXSIZE: 2G
         run: |
-          cmake --build build --target unit_test_space_shared_scheduler
+          set +e
+          cmake --build build --target unit_test_space_shared_scheduler \
+            2>&1 | tee "$RUNNER_TEMP/pr113506-focused-build.log"
+          build_status=${PIPESTATUS[0]}
+          set -e
+
+          if [[ "$build_status" -ne 0 ]]; then
+            first_error="$(grep -m1 -E '(^|[[:space:]])(fatal )?error:' "$RUNNER_TEMP/pr113506-focused-build.log" || true)"
+            if [[ -z "$first_error" ]]; then
+              first_error="$(grep -m1 -E '^FAILED:|ninja: build stopped' "$RUNNER_TEMP/pr113506-focused-build.log" || true)"
+            fi
+            first_error="${first_error//'%'/'%25'}"
+            first_error="${first_error//$'\r'/'%0D'}"
+            first_error="${first_error//$'\n'/'%0A'}"
+            echo "::error title=Focused scheduler compile failure::$first_error"
+            exit "$build_status"
+          fi
+
           ccache --show-stats
 
       - name: Save compiler cache
