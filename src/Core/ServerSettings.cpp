@@ -387,10 +387,10 @@ The maximum memory consumption of the server is further restricted by setting `m
 As a special case, a value of `0` (default) means the server may consume all available memory (excluding further restrictions imposed by `max_server_memory_usage_to_ram_ratio`).
 )", 0) \
     DECLARE(UInt64, memory_reservation_max_allocation_before_suction_bytes, 0, R"(
-Maximum memory a query may already have allocated before memory-reservation suction starts. The pending increase is not included. This setting does not initiate spilling; `memory_reservation_force_spill_before_eviction` controls that independently. A value of `0` means unlimited.
+Maximum memory a query may already have allocated for an active forced-spill pass to end early and transition to memory-reservation suction. The pending increase is not included. Spill completion also permits the transition regardless of this value. This setting does not initiate spilling; `memory_reservation_force_spill_before_eviction` controls that independently. A value of `0` means unlimited, allowing the transition immediately after spill is requested.
 )", 0) \
     DECLARE(UInt64, memory_reservation_suction_max_allocation_bytes, 0, R"(
-Maximum total query allocation, including its pending increase, that is eligible for memory-reservation suction. This setting does not initiate spilling; `memory_reservation_force_spill_before_eviction` controls that independently. A value of `0` means unlimited. If `memory_reservation_max_allocation_before_suction_bytes` is also set, both limits must be satisfied.
+Maximum total query allocation, including its pending increase, that may be served after memory-reservation suction starts. A query whose prospective total exceeds this value proceeds to eviction. This setting does not initiate or prolong spilling. A value of `0` means unlimited.
 )", 0) \
     DECLARE(UInt64, memory_reservation_suction_reserved_bytes, 0, R"(
 Memory withheld from ordinary allocations at the top memory-reservation limit. The capacity becomes available to the top-level parent while its selected descendant is in suction, giving that scope a final opportunity to approve growth before eviction. A value of `0` disables the reserve.

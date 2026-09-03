@@ -87,24 +87,21 @@ public:
     bool isIncreaseSuspended() const { return memory_growth_suspended; }
     bool isSuctioned() const { return memory_growth_suction_priority; }
     bool isProtectedFromEviction() const { return memory_pressure_policy.protect_from_eviction; }
-    bool canEnterSuction(ResourceCost increase_size) const
+    bool canStartSuctionBeforeSpillCompletes() const
     {
-        const UInt64 current_allocation = static_cast<UInt64>(allocated);
         const UInt64 allocation_limit = memory_pressure_policy.max_allocation_before_suction_bytes;
-        if (allocation_limit != 0 && current_allocation > allocation_limit)
-            return false;
+        return allocation_limit == 0 || static_cast<UInt64>(allocated) <= allocation_limit;
+    }
 
+    bool canAllocateInSuction(ResourceCost increase_size) const
+    {
         const UInt64 total_limit = memory_pressure_policy.suction_max_allocation_bytes;
         if (total_limit == 0)
             return true;
 
+        const UInt64 current_allocation = static_cast<UInt64>(allocated);
         const UInt64 pending_increase = static_cast<UInt64>(increase_size);
         return current_allocation <= total_limit && pending_increase <= total_limit - current_allocation;
-    }
-    bool hasSuctionAllocationCeiling() const
-    {
-        return memory_pressure_policy.max_allocation_before_suction_bytes != 0
-            || memory_pressure_policy.suction_max_allocation_bytes != 0;
     }
     UInt64 getSuctionReservedBytes() const { return memory_pressure_policy.suction_reserved_bytes; }
     SuctionQueuePolicy getSuctionQueuePolicy() const { return memory_pressure_policy.suction_queue_policy; }

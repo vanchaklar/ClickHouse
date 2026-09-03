@@ -274,11 +274,12 @@ jobs:
             SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy
             SchedulerSpaceShared.EvictionProtectionIsLastFallback
             SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy
-            SchedulerSpaceShared.SuctionMaxAllocationEvictsAfterSpill
-            SchedulerSpaceShared.MaxAllocationBeforeSuctionIgnoresPendingIncrease
-            SchedulerSpaceShared.CombinedSuctionAllocationLimitsRequireBoth
+            SchedulerSpaceShared.SuctionMaxAllocationRejectsProspectiveTotalAfterSpill
+            SchedulerSpaceShared.UnlimitedMaxAllocationBeforeSuctionStartsImmediately
+            SchedulerSpaceShared.MaxAllocationBeforeSuctionWaitsUntilAllocationFalls
+            SchedulerSpaceShared.SpillCompletionStartsSuctionAboveAllocationThreshold
+            SchedulerSpaceShared.BothSuctionAllocationLimitsApplyInSequence
             SchedulerSpaceShared.SuctionEligibleAllocationWithoutRecoveryControllerEvictsOrdinary
-            SchedulerSpaceShared.SpillStopsWhenAllocationBecomesSuctionEligible
             SchedulerSpaceShared.TopLevelSuctionUsesReservedMemory
           )
 
