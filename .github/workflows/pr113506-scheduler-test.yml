@@ -275,7 +275,9 @@ jobs:
             SchedulerSpaceShared.EvictionProtectionIsLastFallback
             SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy
             SchedulerSpaceShared.SuctionMaxAllocationEvictsAfterSpill
-            SchedulerSpaceShared.SuctionEligibleAllocationSkipsForcedSpill
+            SchedulerSpaceShared.MaxAllocationBeforeSuctionIgnoresPendingIncrease
+            SchedulerSpaceShared.CombinedSuctionAllocationLimitsRequireBoth
+            SchedulerSpaceShared.SuctionEligibleAllocationWithoutRecoveryControllerEvictsOrdinary
             SchedulerSpaceShared.SpillStopsWhenAllocationBecomesSuctionEligible
             SchedulerSpaceShared.TopLevelSuctionUsesReservedMemory
           )

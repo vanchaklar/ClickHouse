@@ -2715,7 +2715,49 @@ TEST(SchedulerSpaceShared, SuctionMaxAllocationEvictsAfterSpill)
 }
 
 
-TEST(SchedulerSpaceShared, SuctionEligibleAllocationSkipsForcedSpill)
+TEST(SchedulerSpaceShared, MaxAllocationBeforeSuctionIgnoresPendingIncrease)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    ResourceAllocation::MemoryPressurePolicy policy;
+    policy.max_allocation_before_suction_bytes = 5000;
+    ManualAllocation requester(queue, "requester", 3000, true, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 7000, true, policy);
+
+    requester.increaseAsync(3000);
+    ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)));
+    EXPECT_EQ(requester.killCount(), 0u);
+}
+
+
+TEST(SchedulerSpaceShared, CombinedSuctionAllocationLimitsRequireBoth)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    ResourceAllocation::MemoryPressurePolicy policy;
+    policy.max_allocation_before_suction_bytes = 5000;
+    policy.suction_max_allocation_bytes = 5000;
+    ManualAllocation requester(queue, "requester", 3000, true, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 7000, true, policy);
+    requester.protectAfterPressureRounds(1);
+
+    requester.increaseAsync(3000);
+    requester.waitPressureCount(1);
+    requester.recoveryCheckpoint();
+    ASSERT_TRUE(requester.waitKillsFor(1, std::chrono::seconds(5)));
+    EXPECT_EQ(ordinary->killCount(), 0u);
+}
+
+
+TEST(SchedulerSpaceShared, SuctionEligibleAllocationWithoutRecoveryControllerEvictsOrdinary)
 {
     SpaceSharedTest t;
     SpaceSharedResourceHolder r(t);
