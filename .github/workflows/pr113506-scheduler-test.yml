@@ -1,0 +1,566 @@
+name: PR 113506 scheduler test
+
+# Source and harness blobs define the focused binary cache; superseded runs are cancelled per branch.
+
+on:
+  push:
+    branches:
+      - ci/pr113506-scheduler-test-f742
+    paths:
+      - 'src/Common/Scheduler/**'
+      - 'src/Common/MemorySpillScheduler.*'
+      - 'src/Core/ServerSettings.*'
+      - 'src/Core/Settings.*'
+      - 'src/Core/SettingsChangesHistory.*'
+      - 'src/Interpreters/ProcessList.cpp'
+      - '.github/ci/pr113506_desired_scheduler_tests.cpp'
+      - '.github/workflows/pr113506-scheduler-test.yml'
+  workflow_dispatch:
+    inputs:
+      run_stress:
+        description: Run the three-hour randomized stress gate
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: pr113506-focused-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scheduler-test:
+    name: scheduler-test (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: debug
+            sanitize: ''
+          - mode: asan-ubsan
+            sanitize: address,undefined
+          - mode: tsan
+            sanitize: thread
+          - mode: msan
+            sanitize: memory
+
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h /
+
+      - name: Check out PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+          show-progress: false
+
+      - name: Restore focused test binary
+        id: focused-binary-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v6
+
+      - name: Restore compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-ccache-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemoryTracker.*', 'src/Core/Settings.*') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-ccache-
+
+      - name: Identify submodule snapshot
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: submodule-snapshot
+        run: echo "tree=$(git rev-parse HEAD:contrib)" >>"$GITHUB_OUTPUT"
+
+      - name: Restore shallow submodules
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        id: submodule-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ runner.os }}-${{ runner.arch }}-pr113506-submodules-${{ steps.submodule-snapshot.outputs.tree }}-v1
+
+      - name: Prepare shallow submodules and build tools
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+
+          if [[ '${{ steps.submodule-cache.outputs.cache-hit }}' == 'true' ]]; then
+            (true) &
+          else
+            (
+              git submodule sync --recursive
+              git submodule update --init --recursive --depth 1 --jobs 8
+            ) &
+          fi
+          submodules_pid=$!
+
+          (
+            for source in /etc/apt/sources.list.d/*; do
+              if [[ -f "$source" ]] && grep -q 'packages.microsoft.com' "$source"; then
+                sudo mv "$source" "$source.disabled"
+              fi
+            done
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build time wget
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
+            echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+            sudo apt-get update
+            sudo apt-get install -y clang-21 lld-21
+          ) &
+          tools_pid=$!
+
+          wait "$submodules_pid"
+          wait "$tools_pid"
+          clang++-21 --version
+          cmake --version
+          nasm --version
+          ninja --version
+
+      - name: Save shallow submodules
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ steps.submodule-cache.outputs.cache-primary-key }}
+
+      - name: Add runner-only focused test target
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/CMakeLists.txt")
+          path.write_text(path.read_text() + r"""
+          if (ENABLE_TESTS)
+              file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
+          #include <gtest/gtest.h>
+          #include <Columns/IColumn_fwd.h>
+          #include <Common/ThreadStatus.h>
+          #include <Processors/IProcessor.h>
+
+          namespace DB
+          {
+          void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
+
+          /// The focused runner deliberately does not link the complete processor library.
+          /// These definitions are sufficient for the port-free spill probe used by the scheduler tests.
+          IProcessor::IProcessor() = default;
+          IProcessor::Status IProcessor::prepare() { return Status::Finished; }
+          void IProcessor::work() {}
+          int IProcessor::schedule() { return -1; }
+          #if defined(OS_LINUX) || defined(OS_DARWIN)
+          std::tuple<int, uint32_t, Int64> IProcessor::scheduleForEvent() { return {-1, 0, -1}; }
+          #endif
+          IProcessor::PipelineUpdate IProcessor::updatePipeline() { return {}; }
+          void IProcessor::cancel(CancelReason) noexcept {}
+
+          void intrusive_ptr_add_ref(const IColumn *) {}
+          void intrusive_ptr_release(const IColumn *) {}
+          }
+
+          int main(int argc, char ** argv)
+          {
+              testing::InitGoogleTest(&argc, argv);
+              return RUN_ALL_TESTS();
+          }
+          ]=])
+
+              clickhouse_add_executable(
+                  unit_test_space_shared_scheduler
+                  ../.github/ci/pr113506_desired_scheduler_tests.cpp
+                  Core/Settings.cpp
+                  "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
+              )
+              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
+              target_link_libraries(
+                  unit_test_space_shared_scheduler PRIVATE
+                  ch_contrib::gmock_all
+                  ch_contrib::gtest
+                  clickhouse_common_io
+                  clickhouse_common_config
+              )
+          endif()
+          """)
+          PY
+
+      - name: Configure focused build
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-21 \
+            -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DSANITIZE='${{ matrix.sanitize }}' \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_LINKER=ld.lld-21 \
+            -DENABLE_TESTS=ON \
+            -DENABLE_EXAMPLES=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DENABLE_JEMALLOC=OFF \
+            -DENABLE_AWS_S3=OFF \
+            -DENABLE_AZURE_BLOB_STORAGE=OFF \
+            -DENABLE_HDFS=OFF \
+            -DENABLE_KAFKA=OFF \
+            -DENABLE_NATS=OFF \
+            -DENABLE_RABBITMQ=OFF \
+            -DENABLE_GRPC=OFF \
+            -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF
+
+      - name: Build focused scheduler test
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          set +e
+          cmake --build build --target unit_test_space_shared_scheduler \
+            2>&1 | tee "$RUNNER_TEMP/pr113506-focused-build.log"
+          build_status=${PIPESTATUS[0]}
+          set -e
+
+          if [[ "$build_status" -ne 0 ]]; then
+            first_error="$(grep -m1 -E '(^|[[:space:]])(fatal )?error:' "$RUNNER_TEMP/pr113506-focused-build.log" || true)"
+            if [[ -z "$first_error" ]]; then
+              first_error="$(grep -m1 -E '^FAILED:|ninja: build stopped' "$RUNNER_TEMP/pr113506-focused-build.log" || true)"
+            fi
+            first_error="${first_error//'%'/'%25'}"
+            first_error="${first_error//$'\r'/'%0D'}"
+            first_error="${first_error//$'\n'/'%0A'}"
+            echo "::error title=Focused scheduler compile failure::$first_error"
+            exit "$build_status"
+          fi
+
+          ccache --show-stats
+
+      - name: Save compiler cache
+        if: steps.focused-binary-cache.outputs.cache-hit != 'true' && steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/pr113506-ccache
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+
+      - name: Run directly affected deterministic tests
+        run: |
+          tests=(
+            SchedulerSpaceShared.PendingAllocationsRunWhileBlockedGrowthIsSuspended
+            SchedulerSpaceShared.SuctionEvictsOneVictimAtATime
+            SchedulerSpaceShared.ForceSpillingRequestCannotCaptureSuctionRelease
+            SchedulerSpaceShared.ChildSuctionIsFollowedByParentLimit
+            SchedulerSpaceShared.ParentSpillingPreventsDescendantSuction
+            SchedulerSpaceShared.SpillCompletionEntersSuction
+            SchedulerSpaceShared.QueueEntryOwnsOneForcedSpillEpoch
+            SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughFairHierarchy
+            SchedulerSpaceShared.SuspendedIncreaseIsHiddenThroughPrecedenceHierarchy
+            SchedulerSpaceShared.EvictionProtectionIsLastFallback
+            SchedulerSpaceShared.LargestMemoryFirstSuctionQueuePolicy
+            SchedulerSpaceShared.SuctionMaxAllocationEvictsAfterSpill
+            SchedulerSpaceShared.SuctionEligibleAllocationSkipsForcedSpill
+            SchedulerSpaceShared.SpillStopsWhenAllocationBecomesSuctionEligible
+            SchedulerSpaceShared.TopLevelSuctionUsesReservedMemory
+          )
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$RUNNER_TEMP/direct-${test_name}.log"
+            if timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" --gtest_print_time=1 >"$log" 2>&1
+            then
+              echo "$test_name PASS"
+            else
+              status=$?
+              echo "$test_name FAIL exit=$status"
+              sed -n '1,120p' "$log"
+              failed=$((failed + 1))
+            fi
+          done
+
+          echo "direct_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Run focused scheduler tests
+        id: focused
+        run: |
+          result_dir="$RUNNER_TEMP/pr113506-focused-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceShared.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 10s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          echo "focused_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Upload focused scenario evidence
+        if: always() && steps.focused.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-${{ matrix.mode }}-focused-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-focused-scenarios
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Run aspirational scheduler scenarios independently
+        id: aspirational
+        run: |
+          result_dir="$RUNNER_TEMP/pr113506-desired-scenarios"
+          mkdir -p "$result_dir"
+          results_csv="$result_dir/results.csv"
+          echo "test,result,exit_code,elapsed_ms" >"$results_csv"
+
+          mapfile -t tests < <(
+            build/src/unit_test_space_shared_scheduler \
+              --gtest_list_tests \
+              --gtest_filter='SchedulerSpaceSharedDesired.*' |
+            python3 -c '
+          import sys
+          suite = ""
+          for raw in sys.stdin:
+              line = raw.rstrip()
+              if not line:
+                  continue
+              if not line.startswith(" "):
+                  suite = line.strip()
+              else:
+                  print(suite + line.strip().split()[0])
+          '
+          )
+          failed=0
+          for test_name in "${tests[@]}"; do
+            log="$result_dir/${test_name}.log"
+            started_ns=$(date +%s%N)
+            set +e
+            timeout --signal=KILL 15s \
+              stdbuf -oL -eL build/src/unit_test_space_shared_scheduler \
+              --gtest_filter="$test_name" \
+              --gtest_print_time=1 >"$log" 2>&1
+            exit_code=$?
+            set -e
+            elapsed_ms=$((($(date +%s%N) - started_ns) / 1000000))
+
+            if ((exit_code == 0)); then
+              result=PASS
+            elif ((exit_code == 124 || exit_code == 137)); then
+              result=TIMEOUT
+              failed=$((failed + 1))
+            else
+              result=FAIL
+              failed=$((failed + 1))
+            fi
+
+            echo "$test_name,$result,$exit_code,$elapsed_ms" >>"$results_csv"
+            echo "$result test=$test_name exit_code=$exit_code elapsed_ms=$elapsed_ms"
+            if [[ "$result" != PASS ]]; then
+              tail -80 "$log"
+            fi
+          done
+
+          {
+            echo "## Intended scheduler behavior scenarios"
+            echo
+            echo "| Scenario | Result | Time (ms) |"
+            echo "|---|---:|---:|"
+            tail -n +2 "$results_csv" | while IFS=, read -r test_name result exit_code elapsed_ms; do
+              echo "| \`$test_name\` | $result | $elapsed_ms |"
+            done
+          } >>"$GITHUB_STEP_SUMMARY"
+
+          echo "desired_scenarios=${#tests[@]} failures=$failed"
+          ((failed == 0))
+
+      - name: Upload aspirational scenario evidence
+        if: always() && steps.aspirational.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-${{ matrix.mode }}-desired-scheduler-scenarios
+          path: ${{ runner.temp }}/pr113506-desired-scenarios
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save verified focused test binary
+        if: always() && steps.focused-binary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/src/unit_test_space_shared_scheduler
+          key: ${{ steps.focused-binary-cache.outputs.cache-primary-key }}
+
+      - name: Stress randomized scheduler tests for three hours
+        id: stress
+        if: ${{ success() && matrix.mode == 'debug' && github.event_name == 'workflow_dispatch' && inputs.run_stress }}
+        timeout-minutes: 190
+        run: |
+          duration_seconds=$((3 * 60 * 60))
+          deadline=$((SECONDS + duration_seconds))
+          seeds_per_invocation=100
+          base_seed=$(($(date +%s) * 1000000))
+          iteration=0
+          test_log="$RUNNER_TEMP/pr113506-scheduler-stress-last.log"
+          time_log="$RUNNER_TEMP/pr113506-scheduler-stress-time.txt"
+          metrics_csv="$RUNNER_TEMP/pr113506-scheduler-stress-metrics.csv"
+
+          echo "iteration,base_seed,seeds,rounds_per_seed,fitting_requests_approved,fitting_bytes_approved,queries_completed,progress_events,release_retry_checkpoints,peak_live_queries,peak_allocated,bytes_released,last_resort_kills,test_elapsed_us,process_wall_seconds,user_seconds,system_seconds,max_rss_kb" >"$metrics_csv"
+
+          while ((SECONDS < deadline)); do
+            iteration=$((iteration + 1))
+            seed=$((base_seed + (iteration - 1) * seeds_per_invocation))
+
+            if ! /usr/bin/time -f '%e,%U,%S,%M' -o "$time_log" \
+              timeout --signal=KILL 120s \
+              env CLICKHOUSE_SCHEDULER_RANDOM_SEED="$seed" \
+                  CLICKHOUSE_SCHEDULER_RANDOM_ITERATIONS="$seeds_per_invocation" \
+                  CLICKHOUSE_SCHEDULER_REPORT_METRICS=1 \
+              build/src/unit_test_space_shared_scheduler \
+              --gtest_filter='SchedulerSpaceShared.LongLivedGrowthCanBeParkedRepeatedly:SchedulerSpaceShared.RandomizedFittingAllocationsAlwaysProgress' \
+              --gtest_brief=1 >"$test_log" 2>&1
+            then
+              echo "FAILED invocation=$iteration base_seed=$seed seeds=$seeds_per_invocation"
+              cat "$test_log"
+              exit 1
+            fi
+
+            metric_line=$(grep '^SCHEDULER_METRICS ' "$test_log")
+            if [[ -z "$metric_line" ]]; then
+              echo "FAILED invocation=$iteration base_seed=$seed: metrics line missing"
+              cat "$test_log"
+              exit 1
+            fi
+
+            for field in $metric_line; do
+              if [[ "$field" == *=* ]]; then
+                key=${field%%=*}
+                value=${field#*=}
+                declare "$key=$value"
+              fi
+            done
+            IFS=, read -r wall_seconds user_seconds system_seconds max_rss_kb <"$time_log"
+
+            echo "$iteration,$seed,$seeds,$rounds_per_seed,$fitting_requests_approved,$fitting_bytes_approved,$queries_completed,$progress_events,$release_retry_checkpoints,$peak_live_queries,$peak_allocated,$bytes_released,$last_resort_kills,$elapsed_us,$wall_seconds,$user_seconds,$system_seconds,$max_rss_kb" >>"$metrics_csv"
+
+            if ((iteration % 10 == 0)); then
+              echo "passed invocations=$iteration seeds=$((iteration * seeds_per_invocation)) last_seed=$((seed + seeds_per_invocation - 1)) elapsed_seconds=$SECONDS wall_seconds=$wall_seconds max_rss_kb=$max_rss_kb"
+            fi
+          done
+
+          python3 - "$metrics_csv" <<'PY'
+          import csv
+          import statistics
+          import sys
+
+          path = sys.argv[1]
+          with open(path, newline="") as metrics_file:
+              rows = list(csv.DictReader(metrics_file))
+
+          if not rows:
+              raise SystemExit("stress test produced no metrics")
+
+          wall = [float(row["process_wall_seconds"]) for row in rows]
+          internal_us = [int(row["test_elapsed_us"]) for row in rows]
+          rss = [int(row["max_rss_kb"]) for row in rows]
+
+          def percentile(values, fraction):
+              ordered = sorted(values)
+              return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * fraction))]
+
+          summary = {
+              "invocations": len(rows),
+              "seeds": sum(int(row["seeds"]) for row in rows),
+              "rounds": sum(int(row["seeds"]) * int(row["rounds_per_seed"]) for row in rows),
+              "fitting_requests_approved": sum(int(row["fitting_requests_approved"]) for row in rows),
+              "queries_completed": sum(int(row["queries_completed"]) for row in rows),
+              "release_retry_checkpoints": sum(int(row["release_retry_checkpoints"]) for row in rows),
+              "last_resort_kills": sum(int(row["last_resort_kills"]) for row in rows),
+              "wall_seconds": sum(wall),
+              "invocations_per_second": len(rows) / sum(wall),
+              "mean_test_ms": statistics.fmean(internal_us) / 1000,
+              "p50_test_ms": percentile(internal_us, 0.50) / 1000,
+              "p95_test_ms": percentile(internal_us, 0.95) / 1000,
+              "max_test_ms": max(internal_us) / 1000,
+              "max_rss_kb": max(rss),
+          }
+
+          print("stress benchmark summary")
+          for key, value in summary.items():
+              print(f"{key}={value}")
+
+          with open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
+              step_summary.write("## Scheduler randomized stress benchmark\n\n")
+              step_summary.write("| Metric | Result |\n|---|---:|\n")
+              for key, value in summary.items():
+                  step_summary.write(f"| {key} | {value} |\n")
+          PY
+
+      - name: Upload scheduler stress metrics
+        if: always() && steps.stress.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-${{ matrix.mode }}-scheduler-stress-metrics
+          path: ${{ runner.temp }}/pr113506-scheduler-stress-*
+          if-no-files-found: warn
+          retention-days: 14
