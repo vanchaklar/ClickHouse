@@ -5,14 +5,8 @@
 #include <Common/Scheduler/Nodes/SpaceShared/SpaceSharedScheduler.h>
 #include <Common/Scheduler/ResourceAllocation.h>
 
-#include <chrono>
-#include <condition_variable>
 #include <exception>
-#include <future>
-#include <functional>
 #include <memory>
-#include <mutex>
-#include <optional>
 
 using namespace DB;
 
@@ -21,25 +15,14 @@ struct SuctionLimitTest
     SpaceSharedScheduler scheduler;
     SchedulerNodePtr root;
 
-    SuctionLimitTest()
-    {
-        scheduler.start(ThreadName::TEST_SCHEDULER);
-    }
-
     ~SuctionLimitTest()
     {
         if (root)
         {
-            std::promise<void> removed;
-            scheduler.event_queue.enqueue([this, &removed]
-            {
-                scheduler.removeChild(root.get());
-                root.reset();
-                removed.set_value();
-            });
-            removed.get_future().get();
+            scheduler.removeChild(root.get());
+            root.reset();
+            drain();
         }
-        scheduler.stop(true);
     }
 
     AllocationQueue * createQueue(ResourceCost max_allocated)
@@ -52,15 +35,24 @@ struct SuctionLimitTest
         AllocationQueue * result = queue.get();
         limit->attachChild(queue);
         root = limit;
-
-        std::promise<void> attached;
-        scheduler.event_queue.enqueue([this, &attached]
-        {
-            scheduler.attachChild(root);
-            attached.set_value();
-        });
-        attached.get_future().get();
+        scheduler.attachChild(root);
+        drain();
         return result;
+    }
+
+    void drain()
+    {
+        while (true)
+        {
+            if (scheduler.event_queue.forceProcess())
+                continue;
+            if (scheduler.decrease)
+                scheduler.approveDecrease();
+            else if (scheduler.increase)
+                scheduler.approveIncrease();
+            else
+                break;
+        }
     }
 };
 
@@ -68,128 +60,93 @@ struct SuctionLimitTest
 struct ManualAllocation : public ResourceAllocation
 {
     ManualAllocation(
+        SuctionLimitTest & test_,
         AllocationQueue * queue_,
         const String & name_,
         ResourceCost initial_size,
         MemoryPressurePolicy memory_pressure_policy = {})
         : ResourceAllocation(*queue_, name_, memory_pressure_policy)
+        , test(test_)
     {
         if (initial_size > 0)
             increase_enqueued = true;
         queue.insertAllocation(*this, initial_size);
-        if (initial_size > 0)
-        {
-            std::unique_lock lock(mutex);
-            cv.wait(lock, [this] { return !increase_enqueued || fail_reason; });
-            if (fail_reason)
-                std::rethrow_exception(fail_reason);
-        }
-    }
-
-    ~ManualAllocation() override
-    {
-        {
-            std::unique_lock lock(mutex);
-            if (removed || fail_reason)
-                return;
-        }
-        queue.removeAllocation(*this);
-        std::unique_lock lock(mutex);
-        cv.wait(lock, [this] { return removed || fail_reason; });
-    }
-
-    void increaseAsync(ResourceCost size)
-    {
-        {
-            std::unique_lock lock(mutex);
-            increase_enqueued = true;
-        }
-        queue.increaseAllocation(*this, size);
-    }
-
-    void decreaseAsync(ResourceCost size)
-    {
-        {
-            std::unique_lock lock(mutex);
-            decrease_enqueued = true;
-        }
-        queue.decreaseAllocation(*this, size);
-    }
-
-    void waitDecreaseSynced()
-    {
-        std::unique_lock lock(mutex);
-        cv.wait(lock, [this] { return fail_reason || !decrease_enqueued; });
+        test.drain();
         if (fail_reason)
             std::rethrow_exception(fail_reason);
     }
 
-    bool waitKillsFor(size_t count, std::chrono::milliseconds timeout)
+    ~ManualAllocation() override
     {
-        std::unique_lock lock(mutex);
-        return cv.wait_for(lock, timeout, [&] { return kills >= count; });
+        if (removed || fail_reason)
+            return;
+        queue.removeAllocation(*this);
+        test.drain();
+        chassert(removed || fail_reason);
     }
 
-    size_t killCount()
+    void increase(ResourceCost size)
     {
-        std::unique_lock lock(mutex);
-        return kills;
+        increase_enqueued = true;
+        queue.increaseAllocation(*this, size);
+        test.drain();
+        if (fail_reason)
+            std::rethrow_exception(fail_reason);
+    }
+
+    void decrease(ResourceCost size)
+    {
+        decrease_enqueued = true;
+        queue.decreaseAllocation(*this, size);
+        test.drain();
+        if (fail_reason)
+            std::rethrow_exception(fail_reason);
+        chassert(!decrease_enqueued);
     }
 
     void enableRecovery()
     {
-        std::unique_lock lock(mutex);
         has_recovery_controller = true;
     }
 
-    void waitPressureCount(size_t count)
+    size_t pressureCount() const
     {
-        std::unique_lock lock(mutex);
-        cv.wait(lock, [&] { return total_pressure_events >= count; });
-    }
-
-    size_t pressureCount()
-    {
-        std::unique_lock lock(mutex);
         return total_pressure_events;
     }
 
-    bool recoveryActive()
+    bool recoveryActive() const
     {
-        std::unique_lock lock(mutex);
         return recovery_active;
+    }
+
+    size_t killCount() const
+    {
+        return kills;
     }
 
     void recoveryCheckpoint()
     {
-        {
-            std::unique_lock lock(mutex);
-            recovery_active = false;
-        }
+        recovery_active = false;
         queue.notifyRecoveryProgress(*this);
+        test.drain();
     }
 
 private:
     GrowthPressureAction onGrowthPressure() override
     {
-        std::unique_lock lock(mutex);
         recovery_active = has_recovery_controller;
         if (recovery_active)
             ++total_pressure_events;
-        cv.notify_all();
         return recovery_active ? GrowthPressureAction::Yield : GrowthPressureAction::Protect;
     }
 
     void onGrowthPressureResolved() override
     {
-        std::unique_lock lock(mutex);
         recovery_active = false;
-        cv.notify_all();
     }
 
     bool isGrowthRecoveryActive() override
     {
-        std::unique_lock lock(mutex);
         return recovery_active;
     }
 
@@ -200,47 +157,36 @@ private:
 
     void increaseCancelled() override
     {
-        std::unique_lock lock(mutex);
         increase_enqueued = false;
-        cv.notify_all();
     }
 
-    void increaseApproved(const IncreaseRequest & increase) override
+    void increaseApproved(const IncreaseRequest & increase_) override
     {
-        std::unique_lock lock(mutex);
-        allocated_size += increase.size;
+        allocated_size += increase_.size;
         increase_enqueued = false;
-        cv.notify_all();
     }
 
-    void decreaseApproved(const DecreaseRequest & decrease) override
+    void decreaseApproved(const DecreaseRequest & decrease_) override
     {
-        std::unique_lock lock(mutex);
-        allocated_size -= decrease.size;
+        allocated_size -= decrease_.size;
         decrease_enqueued = false;
-        if (decrease.removing_allocation)
+        if (decrease_.removing_allocation)
             removed = true;
-        cv.notify_all();
     }
 
     void allocationFailed(const std::exception_ptr & reason) override
     {
-        std::unique_lock lock(mutex);
         fail_reason = reason;
         removed = true;
         allocated_size = 0;
-        cv.notify_all();
     }
 
     void killAllocation(const std::exception_ptr &) override
     {
-        std::unique_lock lock(mutex);
         ++kills;
-        cv.notify_all();
     }
 
-    std::mutex mutex;
-    std::condition_variable cv;
+    SuctionLimitTest & test;
     std::exception_ptr fail_reason;
     bool increase_enqueued = false;
     bool decrease_enqueued = false;
@@ -261,16 +207,18 @@ TEST(SchedulerSuctionLimits, ProspectiveTotalIsCheckedAfterSpillCompletes)
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.max_allocation_before_suction_bytes = 2000;
     policy.suction_max_allocation_bytes = 5000;
-    ManualAllocation requester(queue, "requester", 3000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 7000, policy);
+    ManualAllocation requester(t, queue, "requester", 3000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 7000, policy);
     requester.enableRecovery();
 
-    requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    requester.increase(3000);
+    EXPECT_EQ(requester.pressureCount(), 1u);
     EXPECT_TRUE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 0u);
 
     requester.recoveryCheckpoint();
-    ASSERT_TRUE(requester.waitKillsFor(1, std::chrono::seconds(5)));
+    EXPECT_EQ(requester.killCount(), 1u);
     EXPECT_EQ(ordinary->killCount(), 0u);
 }
 
@@ -282,16 +230,15 @@ TEST(SchedulerSuctionLimits, UnlimitedPreSuctionAllocationStartsImmediately)
 
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.max_allocation_before_suction_bytes = 0;
-    ManualAllocation requester(queue, "requester", 3000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 7000, policy);
+    ManualAllocation requester(t, queue, "requester", 3000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 7000, policy);
     requester.enableRecovery();
 
-    requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
-    ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)))
-        << "An unlimited pre-suction threshold waited for spill completion";
-    EXPECT_EQ(requester.killCount(), 0u);
+    requester.increase(3000);
     EXPECT_EQ(requester.pressureCount(), 1u);
+    EXPECT_FALSE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 1u);
 }
 
 
@@ -302,20 +249,20 @@ TEST(SchedulerSuctionLimits, PreSuctionWaitEndsWhenAllocationFalls)
 
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.max_allocation_before_suction_bytes = 5000;
-    ManualAllocation requester(queue, "requester", 6000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 4000, policy);
+    ManualAllocation requester(t, queue, "requester", 6000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 4000, policy);
     requester.enableRecovery();
 
-    requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    requester.increase(3000);
+    EXPECT_EQ(requester.pressureCount(), 1u);
     EXPECT_TRUE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 0u);
 
-    requester.decreaseAsync(1000);
-    requester.waitDecreaseSynced();
-
-    ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)));
+    requester.decrease(1000);
     EXPECT_FALSE(requester.recoveryActive());
     EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 1u);
 }
 
 
@@ -326,17 +273,19 @@ TEST(SchedulerSuctionLimits, SpillCompletionStartsSuctionAbovePreSuctionLimit)
 
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.max_allocation_before_suction_bytes = 5000;
-    ManualAllocation requester(queue, "requester", 6000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 4000, policy);
+    ManualAllocation requester(t, queue, "requester", 6000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 4000, policy);
     requester.enableRecovery();
 
-    requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    requester.increase(3000);
+    EXPECT_EQ(requester.pressureCount(), 1u);
     EXPECT_TRUE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 0u);
 
     requester.recoveryCheckpoint();
-    ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)));
     EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 1u);
 }
 
 
@@ -348,19 +297,19 @@ TEST(SchedulerSuctionLimits, LimitsApplyInSequence)
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.max_allocation_before_suction_bytes = 5000;
     policy.suction_max_allocation_bytes = 7000;
-    ManualAllocation requester(queue, "requester", 6000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 4000, policy);
+    ManualAllocation requester(t, queue, "requester", 6000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 4000, policy);
     requester.enableRecovery();
 
-    requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    requester.increase(3000);
+    EXPECT_EQ(requester.pressureCount(), 1u);
     EXPECT_TRUE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 0u);
 
-    requester.decreaseAsync(1000);
-    requester.waitDecreaseSynced();
-
-    ASSERT_TRUE(requester.waitKillsFor(1, std::chrono::seconds(5)));
+    requester.decrease(1000);
     EXPECT_FALSE(requester.recoveryActive());
+    EXPECT_EQ(requester.killCount(), 1u);
     EXPECT_EQ(ordinary->killCount(), 0u);
 }
 
@@ -372,10 +321,10 @@ TEST(SchedulerSuctionLimits, ProspectiveTotalAtLimitIsAllowed)
 
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.suction_max_allocation_bytes = 5000;
-    ManualAllocation requester(queue, "requester", 3000, policy);
-    auto ordinary = std::make_unique<ManualAllocation>(queue, "ordinary", 7000, policy);
+    ManualAllocation requester(t, queue, "requester", 3000, policy);
+    auto ordinary = std::make_unique<ManualAllocation>(t, queue, "ordinary", 7000, policy);
 
-    requester.increaseAsync(2000);
-    ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)));
+    requester.increase(2000);
     EXPECT_EQ(requester.killCount(), 0u);
+    EXPECT_EQ(ordinary->killCount(), 1u);
 }
