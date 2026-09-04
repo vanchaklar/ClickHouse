@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/src/unit_test_space_shared_scheduler
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v6
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-${{ matrix.mode }}-scheduler-binary-${{ hashFiles('src/Common/Scheduler/**', 'src/Common/MemorySpillScheduler.*', 'src/Core/ServerSettings.*', 'src/Core/Settings.*', 'src/Interpreters/ProcessList.cpp', '.github/ci/pr113506_desired_scheduler_tests.cpp') }}-harness-v7
 
       - name: Restore compiler cache
         if: steps.focused-binary-cache.outputs.cache-hit != 'true'
@@ -150,6 +150,13 @@ jobs:
           if (ENABLE_TESTS)
               file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
           #include <gtest/gtest.h>
+          #include <Interpreters/ProcessList.h>
+
+          namespace DB
+          {
+          /// The focused runner has no query context; scheduler tests never call this path.
+          MemoryTracker * QueryStatus::getMemoryTracker() const { return nullptr; }
+          }
 
           int main(int argc, char ** argv)
           {
@@ -161,6 +168,7 @@ jobs:
               clickhouse_add_executable(
                   unit_test_space_shared_scheduler
                   ../.github/ci/pr113506_desired_scheduler_tests.cpp
+                  Core/Field.cpp
                   "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
               )
               target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
