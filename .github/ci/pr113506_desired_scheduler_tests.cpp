@@ -13,6 +13,7 @@ using namespace DB;
 struct SuctionLimitTest
 {
     SpaceSharedScheduler scheduler;
+    EventQueue::SchedulerThread scheduler_thread{&scheduler.event_queue};
     SchedulerNodePtr root;
 
     ~SuctionLimitTest()
