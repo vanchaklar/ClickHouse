@@ -3410,15 +3410,15 @@ This only works well when refresh coordination is enabled, i.e. the views are in
 
 ### Workload Scheduling {#refresh-workload-scheduling}
 
-Use `runtime_workload` in the stored SELECT settings to choose the workload for refresh admission and execution:
+Use `refresh_workload` in the stored SELECT settings to choose the workload for refresh admission and execution:
 
 ```sql
 CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 MINUTE
 ENGINE = MergeTree ORDER BY tuple()
-AS SELECT * FROM source SETTINGS runtime_workload = 'refreshes';
+AS SELECT * FROM source SETTINGS refresh_workload = 'refreshes';
 ```
 
-`runtime_workload` takes effect only for the refresh. The ordinary `workload` setting still applies to the CREATE or ALTER query. When both are present, `runtime_workload` overrides `workload` throughout refresh execution, including nested SELECT settings and internal operations. The stored query definition is unchanged. An empty `runtime_workload` preserves the existing `workload` behavior.
+`refresh_workload` takes effect only for the refresh. The ordinary `workload` setting still applies to the CREATE or ALTER query. When both are present, `refresh_workload` overrides `workload` throughout refresh execution, including nested SELECT settings and internal operations. The stored query definition is unchanged. An empty `refresh_workload` preserves the existing `workload` behavior.
 
 When the server setting `use_query_slot_to_refresh_materialized_view` is enabled and a `QUERY` resource is configured for the effective refresh workload, the refresh requests a query slot before starting execution. Admission and execution use the same workload. A queued refresh reports `WaitingForResource` in `system.view_refreshes` without occupying a background execution worker. Stopping, pausing or dropping the view cancels pending admission.
 

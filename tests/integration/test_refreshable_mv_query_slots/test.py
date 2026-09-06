@@ -83,7 +83,7 @@ def create_workload(instance, max_waiting=10):
     )
 
 
-def create_view(instance, name="mv", workload="all", setting="runtime_workload"):
+def create_view(instance, name="mv", workload="all", setting="refresh_workload"):
     instance.query(
         f"CREATE MATERIALIZED VIEW {name} REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND "
@@ -136,11 +136,11 @@ def test_default_off_preserves_select_workload():
         assert metric(legacy, "ConcurrentQueryScheduled") == "0"
 
 
-def test_runtime_workload_with_admission_disabled():
+def test_refresh_workload_with_admission_disabled():
     create_workload(legacy)
     with occupied_slot(legacy):
         assert legacy.query(
-            "SELECT getSetting('workload') SETTINGS runtime_workload='all'", timeout=10
+            "SELECT getSetting('workload') SETTINGS refresh_workload='all'", timeout=10
         ) == "default\n"
         create_view(legacy)
         legacy.query("SYSTEM REFRESH VIEW mv")
@@ -150,7 +150,7 @@ def test_runtime_workload_with_admission_disabled():
 
 
 @pytest.mark.parametrize("replicated", [False, True])
-def test_runtime_workload_separates_create_from_refresh(replicated):
+def test_refresh_workload_separates_create_from_refresh(replicated):
     node.query(
         "CREATE RESOURCE query (QUERY);"
         "CREATE WORKLOAD all;"
@@ -170,7 +170,7 @@ def test_runtime_workload_separates_create_from_refresh(replicated):
             "SETTINGS refresh_retries=0 APPEND (workload String, x UInt64) ENGINE Memory EMPTY "
             "AS SELECT workload, toUInt64(1) AS x FROM "
             "(SELECT getSetting('workload') AS workload SETTINGS workload='original') "
-            "SETTINGS workload='original', runtime_workload='updated'",
+            "SETTINGS workload='original', refresh_workload='updated'",
             timeout=30,
         )
         definition = node.query("SHOW CREATE TABLE rmv_slots.mv")
@@ -186,7 +186,7 @@ def test_runtime_workload_separates_create_from_refresh(replicated):
     wait_metric(node, "ConcurrentQueryAcquired", 0)
 
 
-@pytest.mark.parametrize("setting", ["workload", "runtime_workload"])
+@pytest.mark.parametrize("setting", ["workload", "refresh_workload"])
 def test_async_admission_uses_select_workload(setting):
     create_workload(node)
     create_view(node, setting=setting)
@@ -273,7 +273,7 @@ def test_pause_allows_running_refresh_to_finish():
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT sum(sleepEachRow(1)) AS x FROM numbers(10) "
-        "SETTINGS runtime_workload='all', max_threads=1, max_block_size=1"
+        "SETTINGS refresh_workload='all', max_threads=1, max_block_size=1"
     )
     node.query("SYSTEM REFRESH VIEW mv")
     # Running also covers the short dispatch window. The process-list entry proves that
@@ -317,7 +317,7 @@ def test_workload_change_while_queued_requires_new_admission():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(1) AS x SETTINGS runtime_workload='updated'"
+            "toUInt64(1) AS x SETTINGS refresh_workload='updated'"
         )
     error = node.query_and_get_error("SYSTEM WAIT VIEW mv", timeout=30)
     assert "Refresh workload changed" in error
@@ -336,7 +336,7 @@ def test_select_change_while_queued_uses_fresh_definition():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(2) AS x SETTINGS runtime_workload='all'"
+            "toUInt64(2) AS x SETTINGS refresh_workload='all'"
         )
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT workload, x FROM mv") == "all\t2\n"
@@ -434,7 +434,7 @@ def test_query_slot_released_before_exchange():
     node.query(
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 (x UInt64) ENGINE Memory EMPTY "
-        "AS SELECT toUInt64(1) AS x SETTINGS runtime_workload='all'"
+        "AS SELECT toUInt64(1) AS x SETTINGS refresh_workload='all'"
     )
     node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_exchange")
     try:
