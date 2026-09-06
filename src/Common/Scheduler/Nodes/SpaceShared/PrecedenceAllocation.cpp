@@ -48,13 +48,15 @@ void PrecedenceAllocation::removeChild(ISchedulerNode * child_base)
     if (auto iter = children.find(child_base->basename); iter != children.end())
     {
         SpaceSharedNodePtr child = iter->second;
+        /// Ancestors inspect this subtree while the detach propagates. Exclude the departing
+        /// child from policy state first, but retain its parent link for accounting and ownership.
+        children.erase(iter);
         propagateUpdate(*child, Update()
             .setDetached(child.get())
             .setIncrease(nullptr)
             .setDecrease(nullptr));
         child->setParentNode(nullptr);
         child->updateMinMaxAllocated(std::numeric_limits<ResourceCost>::max());
-        children.erase(iter);
     }
 }
 
@@ -181,7 +183,7 @@ void PrecedenceAllocation::propagateUpdate(ISpaceSharedNode & from_child, Update
         if (from_child.isRunning() && (update.detached == &from_child || from_child.allocations == 0))
             running_children.erase(running_children.iterator_to(from_child));
     }
-    if (update.increase)
+    if (update.increase || update.attached || update.detached)
     {
         if (setIncrease(from_child, update.increase ? *update.increase : from_child.increase, update.detached == &from_child))
             update.setIncrease(increase);

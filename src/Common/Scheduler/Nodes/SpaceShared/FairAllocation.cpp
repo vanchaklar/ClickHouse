@@ -49,6 +49,9 @@ void FairAllocation::removeChild(ISchedulerNode * child_base)
     if (auto iter = children.find(child_base->basename); iter != children.end())
     {
         SpaceSharedNodePtr child = iter->second;
+        /// Ancestors inspect this subtree while the detach propagates. Exclude the departing
+        /// child from policy state first, but retain its parent link for accounting and ownership.
+        children.erase(iter);
         propagateUpdate(*child, Update()
             .setDetached(child.get())
             .setIncrease(nullptr)
@@ -56,7 +59,6 @@ void FairAllocation::removeChild(ISchedulerNode * child_base)
         child->setUsageKey(-1, 0); // do not leave garbage
         child->setParentNode(nullptr);
         child->updateMinMaxAllocated(std::numeric_limits<ResourceCost>::max());
-        children.erase(iter);
     }
 }
 

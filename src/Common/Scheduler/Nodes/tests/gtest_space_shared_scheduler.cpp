@@ -2852,56 +2852,68 @@ TEST(SchedulerSpaceShared, DetachingSuspendedPrecedenceChildUnblocksLowerWork)
 
 TEST(SchedulerSpaceShared, DetachingNestedSuspendedPrecedenceChildUnblocksLowerWork)
 {
-    SpaceSharedTest t;
-    SpaceSharedResourceHolder r(t);
-
-    auto limit = std::make_shared<AllocationLimit>(t.scheduler.event_queue, SchedulerNodeInfo{}, 10000);
-    auto outer = std::make_shared<PrecedenceAllocation>(t.scheduler.event_queue, SchedulerNodeInfo{});
-    outer->basename = "outer";
-    limit->attachChild(outer);
-
-    SchedulerNodeInfo inner_info;
-    inner_info.setPrecedence(0);
-    auto inner = std::make_shared<PrecedenceAllocation>(t.scheduler.event_queue, inner_info);
-    inner->basename = "inner";
-    outer->attachChild(inner);
-
-    auto high_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, SchedulerNodeInfo{});
-    high_queue->basename = "high";
-    AllocationQueue * high_queue_ptr = high_queue.get();
-    inner->attachChild(high_queue);
-
-    SchedulerNodeInfo low_info;
-    low_info.setPrecedence(1);
-    auto low_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, low_info);
-    low_queue->basename = "low";
-    AllocationQueue * low_queue_ptr = low_queue.get();
-    outer->attachChild(low_queue);
-
-    r.root_node = limit;
-    low_queue.reset();
-    r.registerResource();
-
-    auto heavy = std::make_unique<ManualAllocation>(
-        high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy(1));
-    heavy->protectAfterPressureRounds(1);
-    heavy->increaseAsync(5000);
-    auto lower = std::make_unique<ManualAllocation>(low_queue_ptr, "lower", 3000, false);
-    ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
-
-    std::promise<void> detached;
-    auto detached_future = detached.get_future();
-    t.scheduler.event_queue.enqueue([&]
+    for (bool use_fair_inner : {false, true})
     {
-        inner->removeChild(high_queue.get());
-        high_queue.reset();
-        detached.set_value();
-    });
-    detached_future.get();
+        SCOPED_TRACE(use_fair_inner ? "fair inner policy" : "precedence inner policy");
+        SpaceSharedTest t;
+        SpaceSharedResourceHolder r(t);
 
-    ASSERT_TRUE(lower->waitSyncedFor(std::chrono::seconds(5)))
-        << "Nested detached suspension remained as a parent precedence barrier";
-    EXPECT_EQ(lower->size(), 3000);
+        auto limit = std::make_shared<AllocationLimit>(t.scheduler.event_queue, SchedulerNodeInfo{}, 10000);
+        auto outer = std::make_shared<PrecedenceAllocation>(t.scheduler.event_queue, SchedulerNodeInfo{});
+        outer->basename = "outer";
+        limit->attachChild(outer);
+
+        SchedulerNodeInfo inner_info;
+        inner_info.setPrecedence(0);
+        SpaceSharedNodePtr inner;
+        if (use_fair_inner)
+            inner = std::make_shared<FairAllocation>(t.scheduler.event_queue, inner_info);
+        else
+            inner = std::make_shared<PrecedenceAllocation>(t.scheduler.event_queue, inner_info);
+        inner->basename = "inner";
+        outer->attachChild(inner);
+
+        auto high_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, SchedulerNodeInfo{});
+        high_queue->basename = "high";
+        AllocationQueue * high_queue_ptr = high_queue.get();
+        inner->attachChild(high_queue);
+
+        SchedulerNodeInfo low_info;
+        low_info.setPrecedence(1);
+        auto low_queue = std::make_shared<AllocationQueue>(t.scheduler.event_queue, low_info);
+        low_queue->basename = "low";
+        AllocationQueue * low_queue_ptr = low_queue.get();
+        outer->attachChild(low_queue);
+
+        r.root_node = limit;
+        low_queue.reset();
+        r.registerResource();
+
+        auto heavy = std::make_unique<ManualAllocation>(
+            high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy(1));
+        heavy->protectAfterPressureRounds(1);
+        heavy->increaseAsync(5000);
+        auto lower = std::make_unique<ManualAllocation>(low_queue_ptr, "lower", 3000, false);
+        ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
+
+        std::promise<void> detached;
+        auto detached_future = detached.get_future();
+        t.scheduler.event_queue.enqueue([&]
+        {
+            inner->removeChild(high_queue.get());
+            EXPECT_FALSE(inner->hasSuspendedIncrease());
+            EXPECT_FALSE(outer->hasSuspendedIncrease());
+            EXPECT_NE(outer->increase, nullptr);
+            EXPECT_EQ(outer->increase, low_queue_ptr->increase);
+            high_queue.reset();
+            detached.set_value();
+        });
+        detached_future.get();
+
+        ASSERT_TRUE(lower->waitSyncedFor(std::chrono::seconds(5)))
+            << "Nested detached suspension remained as a parent precedence barrier";
+        EXPECT_EQ(lower->size(), 3000);
+    }
 }
 
 
