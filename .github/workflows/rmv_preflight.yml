@@ -50,18 +50,44 @@ jobs:
         run: |
           mkdir -p build-preflight
           # Retain every root entry except tests/docs/GitHub metadata.
-          # The workflow is separately included in the binary cache key.
+          # The build recipe is separately included in the binary cache key.
           source_hash=$(git ls-tree HEAD | awk '$4 != "tests" && $4 != "docs" && $4 != ".github"' | sha256sum | cut -d ' ' -f 1)
           echo "source=$source_hash" >> "$GITHUB_OUTPUT"
           echo "contrib=$(git rev-parse HEAD:contrib)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+          from pathlib import Path
+
+          workflow = Path(".github/workflows/rmv_preflight.yml").read_text()
+          job = workflow.split("  build:\n", 1)[1].split("  integration:\n", 1)[0]
+          blocks = re.split(r"(?=^      - )", job, flags=re.MULTILINE)
+          names = ["Install compiler and build tools", "Fetch shallow build dependencies",
+                   "Configure reduced ClickHouse build", "Build"]
+          recipe = job.split("    steps:\n", 1)[0]
+          for name in names:
+              matches = [block for block in blocks if block.startswith("      - name: " + name + "\n")]
+              assert len(matches) == 1, name
+              recipe += matches[0]
+          recipe = "\n".join(line for line in recipe.split("\n") if not line.startswith("        if:"))
+          digest = hashlib.sha256((recipe.rstrip() + "\n").encode()).hexdigest()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("recipe=" + digest + "\n")
+              # Migrate only the identical recipe from the successful server build.
+              if digest == "a77d9ac490ed0de167a0c7dbdd1843a43774c0fce48ea67e556e6fa16afa638a":
+                  output.write("legacy_recipe=6f451fa44c09b0f5bde93330aeedb92a1b1efd689521d6dbdc099f9507ab5fad\n")
+          PY
       - name: Restore exact server binary
         id: binary-cache
         uses: actions/cache/restore@v4
         with:
           path: build-preflight/programs/clickhouse
-          key: ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-binary-${{ steps.snapshot.outputs.source }}-${{ hashFiles('.github/workflows/rmv_preflight.yml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-binary-${{ steps.snapshot.outputs.source }}-${{ steps.snapshot.outputs.recipe }}
+          restore-keys: |
+            ${{ steps.snapshot.outputs.legacy_recipe != '' && format('{0}-{1}-rmv-clang21-O1-v1-binary-{2}-{3}', runner.os, runner.arch, steps.snapshot.outputs.source, steps.snapshot.outputs.legacy_recipe) || 'rmv-no-legacy-binary-cache' }}
       - name: Restore compiler cache
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         id: compiler-cache
         uses: actions/cache/restore@v4
         with:
@@ -71,7 +97,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-ccache-${{ steps.snapshot.outputs.source }}-
             ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-ccache-
       - name: Restore shallow build dependencies
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         id: submodule-cache
         uses: actions/cache/restore@v4
         with:
@@ -80,12 +106,12 @@ jobs:
             .git/modules/contrib
           key: ${{ runner.os }}-${{ runner.arch }}-rmv-submodules-v1-${{ steps.snapshot.outputs.contrib }}-${{ hashFiles('ci/jobs/fast_test.py', '.gitmodules') }}
       - name: Reclaim runner disk
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           df -h /
       - name: Install compiler and build tools
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         shell: bash
         run: |
           mkdir -p build-preflight
@@ -100,7 +126,7 @@ jobs:
           sudo mkswap /swap-rmv-preflight
           sudo swapon /swap-rmv-preflight
       - name: Fetch shallow build dependencies
-        if: steps.binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == '' && steps.submodule-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           python3 - <<'PY' > build-preflight/submodules.txt
@@ -115,7 +141,7 @@ jobs:
           xargs git submodule init -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
           xargs -P 4 -n 1 git submodule update --depth 1 --single-branch -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
       - name: Save shallow build dependencies
-        if: steps.binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == '' && steps.submodule-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -123,7 +149,7 @@ jobs:
             .git/modules/contrib
           key: ${{ steps.submodule-cache.outputs.cache-primary-key }}
       - name: Configure reduced ClickHouse build
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         shell: bash
         run: |
           cmake -S . -B build-preflight -G Ninja \
@@ -139,17 +165,17 @@ jobs:
             -DENABLE_CLICKHOUSE_SELF_EXTRACTING=OFF \
             > build-preflight/configure.log 2>&1
       - name: Build
-        if: steps.binary-cache.outputs.cache-hit != 'true'
+        if: steps.binary-cache.outputs.cache-matched-key == ''
         timeout-minutes: 300
         shell: bash
         run: |
           ccache --zero-stats
           cmake --build build-preflight --target clickhouse > build-preflight/build.log 2>&1
       - name: Record and save compiler cache
-        if: always() && steps.binary-cache.outputs.cache-hit != 'true'
-        run: ccache --show-stats > build-preflight/ccache.log 2>&1
+        if: always() && steps.binary-cache.outputs.cache-matched-key == ''
+        run: ccache --show-stats 2>&1 | tee build-preflight/ccache.log
       - uses: actions/cache/save@v4
-        if: always() && steps.binary-cache.outputs.cache-hit != 'true'
+        if: always() && steps.binary-cache.outputs.cache-matched-key == ''
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
@@ -202,6 +228,12 @@ jobs:
       - name: Show failure diagnostics
         if: failure()
         run: tail -n 100 build-preflight/*.log
+      - name: Make container logs readable
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" \
+            tests/integration/test_refreshable_mv_query_slots \
+            tests/integration/test_refreshable_mv_query_slot_starvation
       - uses: actions/upload-artifact@v4
         if: always()
         with:
