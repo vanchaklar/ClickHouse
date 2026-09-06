@@ -458,7 +458,9 @@ def test_query_slot_released_before_exchange():
 def test_refresh_workload_overrides_default_reset(enable_analyzer, reset_scope):
     create_workload(node)
     outer_reset = ", workload=DEFAULT" if reset_scope in ("outer", "both") else ""
-    nested_reset = " SETTINGS workload=DEFAULT" if reset_scope in ("nested", "both") else ""
+    nested_reset = (
+        " SETTINGS workload=DEFAULT" if reset_scope in ("nested", "both") else ""
+    )
     node.query(
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND "
@@ -487,7 +489,9 @@ def test_cancel_after_grant_before_admission_resolution(operation):
         with occupied_slot(node):
             node.query("SYSTEM REFRESH VIEW mv")
             wait_status(node, "WaitingForResource")
-            node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+            node.query(
+                "SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_admission_resolution"
+            )
             node.query(
                 "SYSTEM WAIT FAILPOINT refresh_mv_pause_before_admission_resolution PAUSE",
                 timeout=30,
@@ -496,13 +500,17 @@ def test_cancel_after_grant_before_admission_resolution(operation):
         wait_metric(node, "ConcurrentQueryScheduled", 0)
         wait_metric(node, "ConcurrentQueryAcquired", 1)
         node.query(f"SYSTEM {operation} VIEW mv", timeout=30)
-        node.query("SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+        node.query(
+            "SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution"
+        )
         # RefreshExec is still suppressed, so it cannot hide a retained admission slot.
         wait_metric(node, "ConcurrentQueryAcquired", 0)
         assert node.query("SELECT count() FROM mv") == "0\n"
         assert node.query("SELECT 1 SETTINGS workload='all'", timeout=10) == "1\n"
     finally:
-        node.query("SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+        node.query(
+            "SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution"
+        )
         try:
             node.query("DROP TABLE mv SYNC", timeout=30)
         finally:
