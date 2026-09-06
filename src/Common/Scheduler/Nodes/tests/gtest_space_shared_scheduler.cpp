@@ -621,10 +621,11 @@ TEST(SchedulerSpaceShared, RapidCreateDestroy)
 /// A minimal allocation for driving the scheduler deterministically: requests are issued without waiting
 /// (so several can be queued while the scheduler thread is parked) and kill signals are recorded. Lock
 /// ordering mirrors `MemoryReservation`: AllocationQueue::mutex -> ManualAllocation::mutex.
-static ResourceAllocation::MemoryPressurePolicy protectedFromEvictionPolicy()
+static ResourceAllocation::MemoryPressurePolicy protectedFromEvictionPolicy(UInt64 max_allocation_before_suction_bytes = 0)
 {
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.protect_from_eviction = true;
+    policy.max_allocation_before_suction_bytes = max_allocation_before_suction_bytes;
     return policy;
 }
 
@@ -939,7 +940,7 @@ TEST(SchedulerSpaceShared, PendingAllocationsRunWhileBlockedGrowthIsSuspended)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
 
     /// Park the scheduler so both requests are visible in the queue at once. `AllocationQueue` normally
@@ -958,7 +959,7 @@ TEST(SchedulerSpaceShared, PendingAllocationsRunWhileBlockedGrowthIsSuspended)
     /// during the active spill pass, so merely admitting them must not cause `heavy` to be killed.
     small->waitSynced();
     next_small->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_EQ(heavy.size(), 8000);
     EXPECT_EQ(small->size(), 1000);
     EXPECT_EQ(next_small->size(), 1000);
@@ -1023,7 +1024,7 @@ TEST(SchedulerSpaceShared, SuctionEvictsOneVictimAtATime)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
 
     std::promise<void> entered;
@@ -1061,16 +1062,17 @@ TEST(SchedulerSpaceShared, ForceSpillingRequestCannotCaptureSuctionRelease)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation suctioned(queue, "suctioned", 4000, true, protectedFromEvictionPolicy());
-    auto spilling = std::make_unique<ManualAllocation>(queue, "spilling", 3000, true, protectedFromEvictionPolicy());
+    /// Keep both requests spilling until their explicit recovery checkpoints below.
+    ManualAllocation suctioned(queue, "suctioned", 4000, true, protectedFromEvictionPolicy(1));
+    auto spilling = std::make_unique<ManualAllocation>(queue, "spilling", 3000, true, protectedFromEvictionPolicy(1));
     auto releaser = std::make_unique<ManualAllocation>(queue, "releaser", 2000);
     suctioned.protectAfterPressureRounds(2);
     spilling->protectAfterPressureRounds(2);
 
     suctioned.increaseAsync(3000);
-    suctioned.waitPressureCount(1);
+    ASSERT_TRUE(suctioned.waitPressureCountFor(1, std::chrono::seconds(5)));
     spilling->increaseAsync(2000);
-    spilling->waitPressureCount(1);
+    ASSERT_TRUE(spilling->waitPressureCountFor(1, std::chrono::seconds(5)));
 
     std::promise<void> entered;
     std::promise<void> release;
@@ -1117,10 +1119,10 @@ TEST(SchedulerSpaceShared, ChildSuctionIsFollowedByParentLimit)
     outer.reset();
     r.registerResource();
 
-    ManualAllocation allocation(queue_ptr, "allocation", 6000, true, protectedFromEvictionPolicy());
+    ManualAllocation allocation(queue_ptr, "allocation", 6000, true, protectedFromEvictionPolicy(1));
     allocation.protectAfterPressureRounds(2);
     allocation.increaseAsync(2000);
-    allocation.waitPressureCount(1);
+    ASSERT_TRUE(allocation.waitPressureCountFor(1, std::chrono::seconds(5)));
     allocation.recoveryCheckpoint();
 
     std::promise<void> inspected;
@@ -1219,15 +1221,15 @@ TEST(SchedulerSpaceShared, ParentSpillingPreventsDescendantSuction)
     outer.reset();
     r.registerResource();
 
-    ManualAllocation parent(parent_queue_ptr, "parent", 6000, true, protectedFromEvictionPolicy());
-    ManualAllocation child(child_queue_ptr, "child", 4000, true, protectedFromEvictionPolicy());
+    ManualAllocation parent(parent_queue_ptr, "parent", 6000, true, protectedFromEvictionPolicy(1));
+    ManualAllocation child(child_queue_ptr, "child", 4000, true, protectedFromEvictionPolicy(1));
     parent.protectAfterPressureRounds(2);
     child.protectAfterPressureRounds(2);
 
     parent.increaseAsync(2000);
-    parent.waitPressureCount(1);
+    ASSERT_TRUE(parent.waitPressureCountFor(1, std::chrono::seconds(5)));
     child.increaseAsync(2000);
-    child.waitPressureCount(1);
+    ASSERT_TRUE(child.waitPressureCountFor(1, std::chrono::seconds(5)));
     child.recoveryCheckpoint();
 
     std::promise<void> inspected;
@@ -1429,7 +1431,7 @@ TEST(SchedulerSpaceShared, FittingRegularGrowthRemainsProductive)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 6000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 6000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     auto other = std::make_unique<ManualAllocation>(queue, "other", 1000);
 
@@ -1443,7 +1445,7 @@ TEST(SchedulerSpaceShared, FittingRegularGrowthRemainsProductive)
     release.set_value();
 
     anchor->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     other->increaseAsync(500);
     other->waitSynced();
     EXPECT_EQ(other->size(), 1500);
@@ -1467,7 +1469,7 @@ TEST(SchedulerSpaceShared, ZeroSizeVictimIsPoppedBeforeSuctionContinues)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
 
     std::promise<void> entered;
@@ -1481,7 +1483,7 @@ TEST(SchedulerSpaceShared, ZeroSizeVictimIsPoppedBeforeSuctionContinues)
     release.set_value();
 
     beneficiary->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_EQ(heavy.killCount(), 0u);
 
     /// Releasing all memory ends productive membership even though the allocation object stays alive.
@@ -1627,10 +1629,10 @@ TEST(SchedulerSpaceShared, ConcurrentFittingArrivalsPrecedeExternalSuction)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     heavy.increaseAsync(5000);
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
 
     constexpr size_t query_count = 8;
     std::barrier<> start(query_count + 1);
@@ -1713,13 +1715,13 @@ TEST(SchedulerSpaceShared, UnprotectedGrowthDoesNotJoinProtectedRecoveryEpisode)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation protected_heavy(queue, "protected_heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation protected_heavy(queue, "protected_heavy", 8000, true, protectedFromEvictionPolicy(1));
     ManualAllocation unprotected(queue, "unprotected", 1000);
     protected_heavy.protectAfterPressureRounds(1);
 
     protected_heavy.increaseAsync(5000);
     unprotected.increaseAsync(2000);
-    protected_heavy.waitPressureCount(1);
+    ASSERT_TRUE(protected_heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
 
     /// The first release guarantees that the unprotected request has participated in a complete
     /// search round. The second makes it resurface again while both increases remain impossible.
@@ -1747,7 +1749,7 @@ TEST(SchedulerSpaceShared, SpillCompletionEntersSuction)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 4000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 4000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     auto victim = std::make_unique<ManualAllocation>(queue, "victim", 5000);
 
@@ -1761,7 +1763,7 @@ TEST(SchedulerSpaceShared, SpillCompletionEntersSuction)
     release.set_value();
 
     anchor->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     ASSERT_EQ(heavy.killCount(), 0u);
     ASSERT_EQ(victim->killCount(), 0u);
 
@@ -1800,11 +1802,11 @@ TEST(SchedulerSpaceShared, RecoveryLaneRunsBeforeSuctionBackstop)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     heavy.increaseAsync(5000);
 
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_EQ(heavy.killCount(), 0u);
 
     heavy.recoveryCheckpoint();
@@ -1827,7 +1829,7 @@ TEST(SchedulerSpaceShared, EarlyRecoveryCompletionCannotBeLost)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     heavy.runOnNextPressure([&] { heavy.recoveryCheckpoint(); });
     heavy.increaseAsync(5000);
@@ -1967,11 +1969,11 @@ TEST(SchedulerSpaceShared, ForcedSpillReconcilesParkedIncrease)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     heavy.increaseAsync(5000);
 
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     heavy.reconcilePendingIncreaseTo(1000);
     heavy.recoveryCheckpoint();
     heavy.waitSynced();
@@ -2055,7 +2057,7 @@ TEST(SchedulerSpaceShared, RandomizedFittingAllocationsAlwaysProgress)
             return distribution(rng);
         };
 
-        ManualAllocation heavy(queue, "heavy", 5000, true, protectedFromEvictionPolicy());
+        ManualAllocation heavy(queue, "heavy", 5000, true, protectedFromEvictionPolicy(1));
         heavy.protectAfterPressureRounds(2);
         auto releaser = std::make_unique<ManualAllocation>(queue, "releaser", 3000);
 
@@ -2301,7 +2303,7 @@ TEST(SchedulerSpaceShared, LateFittingAdmissionWakesSuspendedQueue)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
 
     std::promise<void> entered;
@@ -2315,7 +2317,7 @@ TEST(SchedulerSpaceShared, LateFittingAdmissionWakesSuspendedQueue)
     release.set_value();
 
     beneficiary->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     ASSERT_EQ(beneficiary->size(), 1000);
     ASSERT_EQ(heavy.killCount(), 0u);
 
@@ -2340,7 +2342,7 @@ TEST(SchedulerSpaceShared, LateFittingRegularGrowthWakesSuspendedQueue)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 7000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 7000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     ManualAllocation late_grower(queue, "late_grower", 500);
 
@@ -2355,7 +2357,7 @@ TEST(SchedulerSpaceShared, LateFittingRegularGrowthWakesSuspendedQueue)
     release.set_value();
 
     beneficiary->waitSynced();
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     late_grower.increaseAsync(500);
     late_grower.waitSynced();
 
@@ -2661,10 +2663,10 @@ TEST(SchedulerSpaceShared, ConcurrentFittingArrivalsAllProgress)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     heavy.increaseAsync(5000);
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
 
     constexpr size_t query_count = 8;
     std::barrier<> start(query_count + 1);
@@ -2712,7 +2714,7 @@ TEST(SchedulerSpaceShared, DetachingLimitCancelsQueuedSuction)
 
             /// The child exits without normal object teardown, so this allocation deliberately
             /// remains alive while the scheduler destroys its owning subtree.
-            auto * heavy = new ManualAllocation(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+            auto * heavy = new ManualAllocation(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
             std::promise<void> recovery_queued;
             auto recovery_queued_future = recovery_queued.get_future();
             heavy->protectAfterPressureRounds(1);
@@ -2775,11 +2777,11 @@ TEST(SchedulerSpaceShared, DetachingParkedOwnerRetriesSurvivingSibling)
     survivor_queue.reset();
     r.registerResource();
 
-    auto heavy = std::make_unique<ManualAllocation>(owner_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy());
+    auto heavy = std::make_unique<ManualAllocation>(owner_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy->protectAfterPressureRounds(1);
     heavy->increaseAsync(5000);
     auto survivor = std::make_unique<ManualAllocation>(survivor_queue_ptr, "survivor", 3000, false);
-    heavy->waitPressureCount(1);
+    ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
 
     std::promise<void> detached;
     auto detached_future = detached.get_future();
@@ -2827,11 +2829,11 @@ TEST(SchedulerSpaceShared, DetachingSuspendedPrecedenceChildUnblocksLowerWork)
     low_queue.reset();
     r.registerResource();
 
-    auto heavy = std::make_unique<ManualAllocation>(high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy());
+    auto heavy = std::make_unique<ManualAllocation>(high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy->protectAfterPressureRounds(1);
     heavy->increaseAsync(5000);
     auto lower = std::make_unique<ManualAllocation>(low_queue_ptr, "lower", 3000, false);
-    heavy->waitPressureCount(1);
+    ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
 
     std::promise<void> detached;
     auto detached_future = detached.get_future();
@@ -2881,11 +2883,11 @@ TEST(SchedulerSpaceShared, DetachingNestedSuspendedPrecedenceChildUnblocksLowerW
     r.registerResource();
 
     auto heavy = std::make_unique<ManualAllocation>(
-        high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy());
+        high_queue_ptr, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy->protectAfterPressureRounds(1);
     heavy->increaseAsync(5000);
     auto lower = std::make_unique<ManualAllocation>(low_queue_ptr, "lower", 3000, false);
-    heavy->waitPressureCount(1);
+    ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
 
     std::promise<void> detached;
     auto detached_future = detached.get_future();
@@ -2914,7 +2916,7 @@ TEST(SchedulerSpaceShared, SuctionUsesExistingVictimOrder)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 3000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 3000, true, protectedFromEvictionPolicy(1));
     heavy.protectAfterPressureRounds(2);
     auto victim = std::make_unique<ManualAllocation>(queue, "victim", 1000);
 
@@ -2968,6 +2970,7 @@ TEST(SchedulerSpaceShared, LargestMemoryFirstSuctionQueuePolicy)
 
     ResourceAllocation::MemoryPressurePolicy largest_first;
     largest_first.protect_from_eviction = true;
+    largest_first.max_allocation_before_suction_bytes = 1;
     largest_first.suction_queue_policy = ResourceAllocation::SuctionQueuePolicy::LargestMemoryFirst;
     ManualAllocation first(queue, "first", 3000, true, largest_first);
     ManualAllocation largest(queue, "largest", 4000, true, largest_first);
@@ -2976,9 +2979,9 @@ TEST(SchedulerSpaceShared, LargestMemoryFirstSuctionQueuePolicy)
     largest.protectAfterPressureRounds(1);
 
     first.increaseAsync(2000);
-    first.waitPressureCount(1);
+    ASSERT_TRUE(first.waitPressureCountFor(1, std::chrono::seconds(5)));
     largest.increaseAsync(3000);
-    largest.waitPressureCount(1);
+    ASSERT_TRUE(largest.waitPressureCountFor(1, std::chrono::seconds(5)));
 
     std::promise<void> entered;
     std::promise<void> release;
@@ -3005,6 +3008,7 @@ TEST(SchedulerSpaceShared, LargestMemoryFirstConsidersOnlyRequestsWaitingForSuct
 
     ResourceAllocation::MemoryPressurePolicy policy;
     policy.protect_from_eviction = true;
+    policy.max_allocation_before_suction_bytes = 1;
     policy.suction_queue_policy = ResourceAllocation::SuctionQueuePolicy::LargestMemoryFirst;
     policy.suction_reserved_bytes = 2000;
 
@@ -3015,9 +3019,9 @@ TEST(SchedulerSpaceShared, LargestMemoryFirstConsidersOnlyRequestsWaitingForSuct
     largest.protectAfterPressureRounds(1);
 
     first.increaseAsync(2000);
-    first.waitPressureCount(1);
+    ASSERT_TRUE(first.waitPressureCountFor(1, std::chrono::seconds(5)));
     largest.increaseAsync(3000);
-    largest.waitPressureCount(1);
+    ASSERT_TRUE(largest.waitPressureCountFor(1, std::chrono::seconds(5)));
 
     first.recoveryCheckpoint();
 
@@ -3037,13 +3041,13 @@ TEST(SchedulerSpaceShared, ZeroReconciledSuctionRetriesHiddenRequests)
     AllocationQueue * queue = r.addQueue("/queue");
     r.registerResource();
 
-    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy());
+    ManualAllocation heavy(queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     auto releaser = std::make_unique<ManualAllocation>(queue, "releaser", 2000);
     heavy.protectAfterPressureRounds(1);
 
     heavy.increaseAsync(5000);
     auto blocked = std::make_unique<ManualAllocation>(queue, "blocked", 3000, false);
-    heavy.waitPressureCount(1);
+    ASSERT_TRUE(heavy.waitPressureCountFor(1, std::chrono::seconds(5)));
     heavy.recoveryCheckpoint();
     ASSERT_TRUE(releaser->waitKillsFor(1, std::chrono::seconds(5)));
 
@@ -3084,7 +3088,7 @@ TEST(SchedulerSpaceShared, SuctionMaxAllocationRejectsProspectiveTotalAfterSpill
     requester.protectAfterPressureRounds(1);
 
     requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    ASSERT_TRUE(requester.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_TRUE(requester.recoveryActive());
 
     /// Completing the spill permits suction even though the existing allocation is still above
@@ -3111,7 +3115,7 @@ TEST(SchedulerSpaceShared, UnlimitedMaxAllocationBeforeSuctionStartsImmediately)
     requester.protectAfterPressureRounds(1);
 
     requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    ASSERT_TRUE(requester.waitPressureCountFor(1, std::chrono::seconds(5)));
     ASSERT_TRUE(ordinary->waitKillsFor(1, std::chrono::seconds(5)))
         << "An unlimited pre-suction threshold waited for spill completion";
     EXPECT_EQ(requester.killCount(), 0u);
@@ -3135,7 +3139,7 @@ TEST(SchedulerSpaceShared, MaxAllocationBeforeSuctionWaitsUntilAllocationFalls)
     requester.protectAfterPressureRounds(1);
 
     requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    ASSERT_TRUE(requester.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_TRUE(requester.recoveryActive());
 
     /// Model memory reclaimed by the active spill. Reaching the existing-allocation threshold
@@ -3165,7 +3169,7 @@ TEST(SchedulerSpaceShared, SpillCompletionStartsSuctionAboveAllocationThreshold)
     requester.protectAfterPressureRounds(1);
 
     requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    ASSERT_TRUE(requester.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_TRUE(requester.recoveryActive());
 
     requester.recoveryCheckpoint();
@@ -3191,7 +3195,7 @@ TEST(SchedulerSpaceShared, BothSuctionAllocationLimitsApplyInSequence)
     requester.protectAfterPressureRounds(1);
 
     requester.increaseAsync(3000);
-    requester.waitPressureCount(1);
+    ASSERT_TRUE(requester.waitPressureCountFor(1, std::chrono::seconds(5)));
     EXPECT_TRUE(requester.recoveryActive());
 
     /// The existing allocation reaches the pre-suction limit, allowing the transition. Only then
