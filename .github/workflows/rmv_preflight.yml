@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      CCACHE_DIR: ${{ runner.temp }}/rmv-ccache
+      CCACHE_DIR: /tmp/rmv-ccache
       CCACHE_MAXSIZE: 3G
       CCACHE_COMPILERCHECK: content
     steps:
