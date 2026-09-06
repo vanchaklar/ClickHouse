@@ -19,9 +19,12 @@ jobs:
       - name: Check Python regression tests
         run: |
           mkdir -p build-preflight
-          python3 -m pip install black==24.10.0 > build-preflight/python_setup.log 2>&1
+          python3 -m pip install 'black>=26,<27' > build-preflight/python_setup.log 2>&1
           python3 -m black --check --diff tests/integration/test_refreshable_mv_query_slots/test.py tests/integration/test_refreshable_mv_query_slot_starvation/test.py > build-preflight/python_style.log 2>&1
           python3 -m compileall -q tests/integration/test_refreshable_mv_query_slots tests/integration/test_refreshable_mv_query_slot_starvation > build-preflight/python_syntax.log 2>&1
+      - name: Show failure diagnostics
+        if: failure()
+        run: tail -n 100 build-preflight/*.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -62,7 +65,9 @@ jobs:
           assignment = next(n for n in function.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "submodules_to_update" for t in n.targets))
           print("\n".join(ast.literal_eval(assignment.value)))
           PY
-          xargs -P 4 -n 1 git submodule update --init --depth 1 --single-branch -- < build-preflight/submodules.txt > build-preflight/submodules.log 2>&1
+          git submodule sync > build-preflight/submodules.log 2>&1
+          xargs git submodule init -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
+          xargs -P 4 -n 1 git submodule update --depth 1 --single-branch -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
       - name: Configure reduced ClickHouse build
         shell: bash
         run: |
@@ -89,6 +94,9 @@ jobs:
           path: build-preflight/programs/clickhouse
           if-no-files-found: error
           retention-days: 3
+      - name: Show failure diagnostics
+        if: failure()
+        run: tail -n 100 build-preflight/*.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -116,6 +124,9 @@ jobs:
           python3 -m ci.praktika run integration --workers 1 \
             --test test_refreshable_mv_query_slots test_refreshable_mv_query_slot_starvation \
             > build-preflight/test_rmv.log 2>&1
+      - name: Show failure diagnostics
+        if: failure()
+        run: tail -n 100 build-preflight/*.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
