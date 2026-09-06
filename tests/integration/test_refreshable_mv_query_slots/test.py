@@ -403,3 +403,51 @@ def test_detach_clears_running_znode_without_session_expiry():
     finally:
         keeper.stop()
         keeper.close()
+
+
+@pytest.mark.parametrize("operation", ["STOP", "PAUSE"])
+def test_cancel_granted_admission_before_execution(operation):
+    create_workload(node)
+    create_view(node)
+    node.query("SYSTEM ENABLE FAILPOINT refresh_mv_skip_execution")
+    try:
+        node.query("SYSTEM REFRESH VIEW mv")
+        # The failpoint keeps the attempt in Requested without occupying a pool worker.
+        wait_status(node, "Running")
+        wait_metric(node, "ConcurrentQueryAcquired", 1)
+        node.query(f"SYSTEM {operation} VIEW mv", timeout=30)
+        # Check while execution is still suppressed: it cannot release the slot for us.
+        wait_metric(node, "ConcurrentQueryAcquired", 0)
+        assert metric(node, "ConcurrentQueryScheduled") == "0"
+        assert node.query("SELECT count() FROM mv") == "0\n"
+        assert node.query("SELECT 1 SETTINGS workload='all'", timeout=10) == "1\n"
+    finally:
+        # Drop while execution is suppressed so shutdown reconciles the Requested attempt.
+        try:
+            node.query("DROP TABLE mv SYNC", timeout=30)
+        finally:
+            node.query("SYSTEM DISABLE FAILPOINT refresh_mv_skip_execution")
+
+
+def test_query_slot_released_before_exchange():
+    create_workload(node)
+    node.query(
+        "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
+        "SETTINGS refresh_retries=0 (x UInt64) ENGINE Memory EMPTY "
+        "AS SELECT toUInt64(1) AS x SETTINGS runtime_workload='all'"
+    )
+    node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_exchange")
+    try:
+        node.query("SYSTEM REFRESH VIEW mv")
+        node.query(
+            "SYSTEM WAIT FAILPOINT refresh_mv_pause_before_exchange PAUSE", timeout=30
+        )
+        # INSERT SELECT is finished, but the replacement has not been published yet.
+        assert node.query("SELECT count() FROM mv") == "0\n"
+        wait_metric(node, "ConcurrentQueryAcquired", 0)
+        assert node.query("SELECT 1 SETTINGS workload='all'", timeout=10) == "1\n"
+    finally:
+        node.query("SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_exchange")
+    node.query("SYSTEM WAIT VIEW mv", timeout=30)
+    assert node.query("SELECT x FROM mv") == "1\n"
+    wait_metric(node, "ConcurrentQueryAcquired", 0)

@@ -1527,6 +1527,14 @@ std::optional<UUID> RefreshTask::executeRefreshUnlocked(int32_t root_znode_versi
         }
 
         {
+            /// Release admission before the target-table exchange or error cleanup. Planning may
+            /// fail before the slot is adopted by `ProcessList`, so cover both owners.
+            SCOPE_EXIT({
+                query_slot.reset();
+                if (process_list_entry)
+                    process_list_entry->getQueryStatus()->releaseQuerySlot();
+            });
+
             /// Create a table.
             query_for_logging = "(create target table)";
             normalized_query_hash = normalizedQueryHash(query_for_logging, false);
@@ -2007,7 +2015,16 @@ void RefreshTask::interruptExecution()
 {
     chassert(!mutex.try_lock());
     if (execution.query_slot)
-        execution.query_slot->cancel();
+    {
+        if (execution.state == ExecutionState::State::Requested)
+        {
+            /// Admission is resolved, but execution has not taken ownership yet. Release the slot
+            /// now even if `RefreshExec` is backlogged; its pending invocation observes cancellation.
+            execution.query_slot.reset();
+        }
+        else
+            execution.query_slot->cancel();
+    }
     std::shared_ptr<QueryStatus> query_status;
     {
         std::unique_lock lock(execution.executor_mutex);
