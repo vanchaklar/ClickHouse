@@ -74,25 +74,24 @@ public:
     bool supportsPooling() const override { return false; }
 
     void deserializeBinaryBulk(
-        IColumn & column, ReadBuffer & istr, size_t rows_offset, size_t limit, double avg_value_size_hint) const override
+        IColumn & column, ReadBuffer & istr, size_t limit, double avg_value_size_hint) const override
     {
         const size_t previous_size = column.size();
-        nested_serialization->deserializeBinaryBulk(column, istr, rows_offset, limit, avg_value_size_hint);
+        nested_serialization->deserializeBinaryBulk(column, istr, limit, avg_value_size_hint);
         validateNewRows(column, previous_size);
     }
 
     void deserializeBinaryBulkWithMultipleStreams(
-        ColumnPtr & column,
-        size_t rows_offset,
+        IColumn & column,
         size_t limit,
         DeserializeBinaryBulkSettings & settings,
         DeserializeBinaryBulkStatePtr & state,
         SubstreamsCache * cache) const override
     {
-        const size_t previous_size = column->size();
+        const size_t previous_size = column.size();
         nested_serialization->deserializeBinaryBulkWithMultipleStreams(
-            column, rows_offset, limit, settings, state, cache);
-        validateNewRows(*column, previous_size);
+            column, limit, settings, state, cache);
+        validateNewRows(column, previous_size);
     }
 
     void deserializeBinary(IColumn & column, ReadBuffer & istr, const FormatSettings & settings) const override
