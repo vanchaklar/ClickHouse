@@ -7,7 +7,6 @@ import pytest
 
 from helpers.cluster import ClickHouseCluster
 
-
 cluster = ClickHouseCluster(__file__)
 node = cluster.add_instance(
     "node",
@@ -64,7 +63,9 @@ def metric(instance, name):
 
 
 def wait_metric(instance, name, value):
-    wait_query(instance, f"SELECT value FROM system.metrics WHERE metric = '{name}'", value)
+    wait_query(
+        instance, f"SELECT value FROM system.metrics WHERE metric = '{name}'", value
+    )
 
 
 def wait_status(instance, status, database="default", view="mv"):
@@ -125,10 +126,13 @@ def occupied_slot(instance, workload="all"):
 def test_default_off_preserves_select_workload():
     create_workload(legacy)
     create_view(legacy, setting="workload")
-    assert legacy.query(
-        "SELECT value FROM system.server_settings "
-        "WHERE name='use_query_slot_to_refresh_materialized_view'"
-    ).strip() == "0"
+    assert (
+        legacy.query(
+            "SELECT value FROM system.server_settings "
+            "WHERE name='use_query_slot_to_refresh_materialized_view'"
+        ).strip()
+        == "0"
+    )
     with occupied_slot(legacy):
         legacy.query("SYSTEM REFRESH VIEW mv")
         legacy.query("SYSTEM WAIT VIEW mv", timeout=30)
@@ -139,9 +143,13 @@ def test_default_off_preserves_select_workload():
 def test_refresh_workload_with_admission_disabled():
     create_workload(legacy)
     with occupied_slot(legacy):
-        assert legacy.query(
-            "SELECT getSetting('workload') SETTINGS refresh_workload='all'", timeout=10
-        ) == "default\n"
+        assert (
+            legacy.query(
+                "SELECT getSetting('workload') SETTINGS refresh_workload='all'",
+                timeout=10,
+            )
+            == "default\n"
+        )
         create_view(legacy)
         legacy.query("SYSTEM REFRESH VIEW mv")
         legacy.query("SYSTEM WAIT VIEW mv", timeout=30)
@@ -159,7 +167,8 @@ def test_refresh_workload_separates_create_from_refresh(replicated):
     )
     engine = (
         "Replicated('/test/rmv_query_slots/create', 's', 'r')"
-        if replicated else "Atomic"
+        if replicated
+        else "Atomic"
     )
     node.query(f"CREATE DATABASE rmv_slots ENGINE={engine}", timeout=30)
     with occupied_slot(node, workload="updated"):
@@ -195,10 +204,13 @@ def test_async_admission_uses_select_workload(setting):
         wait_status(node, "WaitingForResource")
         assert metric(node, "ConcurrentQueryScheduled") == "1"
         assert node.query("SELECT count() FROM mv") == "0\n"
-        assert node.query(
-            "SELECT count() FROM system.background_schedule_pool "
-            "WHERE table='mv' AND log_name='RefreshExec' AND executing"
-        ) == "0\n"
+        assert (
+            node.query(
+                "SELECT count() FROM system.background_schedule_pool "
+                "WHERE table='mv' AND log_name='RefreshExec' AND executing"
+            )
+            == "0\n"
+        )
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT workload, x FROM mv") == "all\t1\n"
     wait_metric(node, "ConcurrentQueryScheduled", 0)
