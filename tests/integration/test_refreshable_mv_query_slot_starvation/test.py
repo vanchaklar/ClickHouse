@@ -7,7 +7,9 @@ import pytest
 from helpers.cluster import ClickHouseCluster
 
 cluster = ClickHouseCluster(__file__)
-node = cluster.add_instance("node", main_configs=["configs/small_pool.xml"])
+node = cluster.add_instance(
+    "node", main_configs=["configs/small_pool.xml"], cpu_limit=4
+)
 
 SLOW_VIEWS = 10
 FAST_VIEWS = 100

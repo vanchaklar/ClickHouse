@@ -13,12 +13,14 @@ node = cluster.add_instance(
     main_configs=["configs/query_slots.xml"],
     with_zookeeper=True,
     stay_alive=True,
+    cpu_limit=4,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
 )
 legacy = cluster.add_instance(
     "legacy",
     with_zookeeper=True,
     stay_alive=True,
+    cpu_limit=4,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
 )
 
