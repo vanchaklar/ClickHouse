@@ -1,0 +1,107 @@
+name: RMV preflight
+on:
+  push:
+    branches: ['agent/rmv-preflight-20260906']
+permissions:
+  contents: read
+concurrency:
+  group: rmv-preflight
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install compiler and build tools
+        shell: bash
+        run: |
+          mkdir -p build-preflight
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o build-preflight/llvm-key.asc
+          sudo gpg --dearmor -o /usr/share/keyrings/llvm-preflight.gpg build-preflight/llvm-key.asc
+          echo 'deb [signed-by=/usr/share/keyrings/llvm-preflight.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm-preflight.list
+          sudo apt-get update > build-preflight/setup.log 2>&1
+          sudo apt-get install -y clang-22 lld-22 llvm-22 cmake ninja-build nasm yasm python3 > build-preflight/packages.log 2>&1
+          sudo apt-get clean
+          sudo fallocate -l 16G /swap-rmv-preflight
+          sudo chmod 600 /swap-rmv-preflight
+          sudo mkswap /swap-rmv-preflight
+          sudo swapon /swap-rmv-preflight
+      - name: Fetch shallow build dependencies
+        shell: bash
+        run: |
+          python3 - <<'PY' > build-preflight/submodules.txt
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path("ci/jobs/fast_test.py").read_text())
+          function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "clone_submodules")
+          assignment = next(n for n in function.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "submodules_to_update" for t in n.targets))
+          print("\n".join(ast.literal_eval(assignment.value)))
+          PY
+          xargs -P 4 -n 1 git submodule update --init --depth 1 --single-branch -- < build-preflight/submodules.txt > build-preflight/submodules.log 2>&1
+      - name: Configure reduced ClickHouse build
+        shell: bash
+        run: |
+          cmake -S . -B build-preflight -G Ninja \
+            -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS_RELEASE='-O1 -DNDEBUG' -DCMAKE_CXX_FLAGS_RELEASE='-O1 -DNDEBUG' \
+            '-DCMAKE_JOB_POOLS=compile_pool=2;link_pool=1' \
+            -DCMAKE_JOB_POOL_COMPILE=compile_pool -DCMAKE_JOB_POOL_LINK=link_pool \
+            -DENABLE_LIBRARIES=OFF -DENABLE_TESTS=OFF -DENABLE_UTILS=OFF \
+            -DENABLE_THINLTO=OFF -DENABLE_RUST=OFF -DENABLE_NURAFT=ON \
+            -DENABLE_SIMDJSON=ON -DENABLE_JEMALLOC=ON -DENABLE_LIBURING=ON \
+            -DENABLE_LIBFIU=ON -DENABLE_YAML_CPP=ON \
+            -DENABLE_CLICKHOUSE_SELF_EXTRACTING=OFF \
+            > build-preflight/configure.log 2>&1
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build-preflight --target clickhouse > build-preflight/build.log 2>&1
+          build-preflight/programs/clickhouse local --query "SELECT version()" > build-preflight/version.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rmv-preflight-clickhouse
+          path: build-preflight/programs/clickhouse
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rmv-preflight-build-logs
+          path: build-preflight/*.log
+          retention-days: 3
+  integration:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: rmv-preflight-clickhouse
+          path: ci/tmp
+      - name: Run RMV integration suites
+        shell: bash
+        run: |
+          chmod +x ci/tmp/clickhouse
+          mkdir -p build-preflight
+          python3 -m ci.praktika run integration --workers 1 \
+            --test test_refreshable_mv_query_slots test_refreshable_mv_query_slot_starvation \
+            > build-preflight/test_rmv.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rmv-preflight-test-logs
+          path: |
+            build-preflight/*.log
+            ci/tmp/pytest*
+            tests/integration/test_refreshable_mv_query_slots/_instances*/**/*.log
+            tests/integration/test_refreshable_mv_query_slot_starvation/_instances*/**/*.log
+          retention-days: 3
