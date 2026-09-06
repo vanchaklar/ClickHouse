@@ -128,7 +128,7 @@ jobs:
         run: |
           cmake -S . -B build-preflight -G Ninja \
             -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCOMPILER_CACHE=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS_RELEASE='-O1 -DNDEBUG' -DCMAKE_CXX_FLAGS_RELEASE='-O1 -DNDEBUG' \
             '-DCMAKE_JOB_POOLS=compile_pool=2;link_pool=1' \
