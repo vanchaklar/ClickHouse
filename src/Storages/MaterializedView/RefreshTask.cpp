@@ -941,15 +941,15 @@ void RefreshTask::doScheduling(bool is_shutdown)
         {
             if (execution.query_slot->isReady())
             {
-                /// Cancellation can lose to dequeue while still `WaitingForResource`. Release the
-                /// granted slot before dispatching the task that records the cancelled attempt.
-                if (execution.interrupt_execution.load())
-                    execution.query_slot.reset();
-
                 /// Resolve admission before the coordination early returns as well: losing Keeper
                 /// capabilities or ownership must not strand an already-cancelled attempt.
                 execution_task->schedule();
                 execution.state = ExecutionState::State::Requested;
+                /// Cancellation may have lost to dequeue while still `WaitingForResource`. Release
+                /// the slot without waiting for `RefreshExec`, which cannot take `mutex` yet.
+                /// Keep it until dispatch succeeds so a throwing `schedule` can be retried safely.
+                if (execution.interrupt_execution.load())
+                    execution.query_slot.reset();
             }
             else
             {
