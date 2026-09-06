@@ -786,10 +786,10 @@ void AllocationQueue::processActivation()
         }
 
         const bool has_active_suction = preferred_suction
-            || (increase
-                && increase->allocation.increasing_hook.is_linked()
-                && increase->allocation.memory_growth_suction_priority
-                && !increase->allocation.memory_growth_recovery_pending);
+            || (suction_growth
+                && suction_growth->increasing_hook.is_linked()
+                && suction_growth->memory_growth_suction_priority
+                && !suction_growth->memory_growth_recovery_pending);
 
         // Update requests. A completed spill enters suction only after this queue has exhausted
         // every currently visible fitting opportunity. This preserves normal scheduling during
@@ -887,9 +887,12 @@ bool AllocationQueue::setIncrease(IncreaseRequest * preferred_suction) // TSA_RE
             && !allocation.memory_growth_suspended
             && !allocation.memory_growth_recovery_pending;
     };
+    /// A rejected pending allocation may already be destroyed by `allocationFailed`.
+    /// Use the tracked suction owner; `old_increase` is only safe for pointer comparison.
+    IncreaseRequest * current_suction = suction_growth ? &suction_growth->increase : nullptr;
     IncreaseRequest * suction = is_eligible_suction(preferred_suction)
         ? preferred_suction
-        : (is_eligible_suction(old_increase) ? old_increase : nullptr);
+        : (is_eligible_suction(current_suction) ? current_suction : nullptr);
     auto eligible = std::find_if(increasing_allocations.begin(), increasing_allocations.end(), [](const ResourceAllocation & allocation)
     {
         return !allocation.memory_growth_suspended && !allocation.memory_growth_recovery_pending;
