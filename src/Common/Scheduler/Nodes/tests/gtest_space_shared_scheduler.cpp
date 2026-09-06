@@ -888,6 +888,90 @@ private: // interaction with the scheduler thread
 };
 
 
+/// Destroy a failed pending allocation inside its notification, before the queue can continue.
+/// This makes a stale request dereference deterministic under ASan without thread timing.
+static void checkPendingAllocationDestruction(const std::function<void(AllocationQueue &, ResourceAllocation &)> & reject)
+{
+    bool failed = false;
+    EventQueue event_queue;
+    EventQueue::SchedulerThread scheduler_thread(&event_queue);
+    auto policy = std::make_shared<PrecedenceAllocation>(event_queue, SchedulerNodeInfo{});
+    auto queue = std::make_shared<AllocationQueue>(event_queue, SchedulerNodeInfo{});
+    queue->basename = "queue";
+    policy->attachChild(queue);
+
+    struct DestroyOnFailureAllocation : ResourceAllocation
+    {
+        DestroyOnFailureAllocation(AllocationQueue & queue_, bool & failed_)
+            : ResourceAllocation(queue_, "pending")
+            , failed(failed_)
+        {}
+
+        void increaseApproved(const IncreaseRequest &) override
+        {
+            ADD_FAILURE() << "Unexpected admission";
+        }
+
+        void decreaseApproved(const DecreaseRequest &) override
+        {
+            ADD_FAILURE() << "Unexpected decrease";
+        }
+
+        void killAllocation(const std::exception_ptr &) override
+        {
+            ADD_FAILURE() << "Unexpected eviction";
+        }
+
+
+        void allocationFailed(const std::exception_ptr &) override
+        {
+            failed = true;
+            delete this;
+        }
+
+        bool & failed;
+    };
+
+    auto * allocation = new DestroyOnFailureAllocation(*queue, failed);
+    queue->insertAllocation(*allocation, 1000);
+    ASSERT_TRUE(event_queue.tryProcess());
+    ASSERT_NE(queue->increase, nullptr);
+    ASSERT_EQ(policy->increase, queue->increase);
+
+    reject(*queue, *allocation);
+
+    EXPECT_TRUE(failed);
+    EXPECT_EQ(queue->getPending(), 0u);
+    EXPECT_EQ(queue->increase, nullptr);
+    EXPECT_EQ(policy->increase, nullptr);
+}
+
+TEST(SchedulerSpaceShared, CancellingPendingAllocationDoesNotReadDestroyedRequest)
+{
+    checkPendingAllocationDestruction([](AllocationQueue & queue, ResourceAllocation & allocation)
+    {
+        queue.removeAllocation(allocation);
+        queue.processActivation();
+    });
+}
+
+TEST(SchedulerSpaceShared, QueueLimitRejectionDoesNotReadDestroyedRequest)
+{
+    checkPendingAllocationDestruction([](AllocationQueue & queue, ResourceAllocation &)
+    {
+        queue.updateQueueLimit(0);
+    });
+}
+
+TEST(SchedulerSpaceShared, MemoryLimitRejectionDoesNotReadDestroyedRequest)
+{
+    checkPendingAllocationDestruction([](AllocationQueue & queue, ResourceAllocation &)
+    {
+        queue.updateMinMaxAllocated(500);
+    });
+}
+
+
 /// An eviction must not be issued while a decrease is pending under the limit: `allocated` still contains
 /// memory that is about to be released, so the kill may be unnecessary. Here `b`'s decrease frees exactly
 /// the room `a`'s increase needs; both requests reach the scheduler in one activation (the scheduler
