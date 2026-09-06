@@ -127,6 +127,8 @@ namespace FailPoints
     /// the "scheduled but never started" state (execution.state == Requested) that shutdown has to
     /// normalize before giving up coordination.
     extern const char refresh_mv_skip_execution[];
+    /// Holds scheduling before taking the task mutex to exercise admission/cancellation races.
+    extern const char refresh_mv_pause_before_admission_resolution[];
 }
 
 /// The scheduler only publishes an outcome and wakes the refresh scheduling task. It never runs
@@ -914,6 +916,7 @@ void RefreshTask::setFakeTime(std::optional<Int64> t)
 void RefreshTask::doScheduling(bool is_shutdown)
 {
     auto component_guard = Coordination::setCurrentComponent("RefreshTask::doScheduling");
+    FailPointInjection::pauseFailPoint(FailPoints::refresh_mv_pause_before_admission_resolution);
     std::unique_lock lock(mutex);
 
     /// shutdown() runs doScheduling(is_shutdown=true) without holding the mutex, so a parallel
@@ -938,6 +941,11 @@ void RefreshTask::doScheduling(bool is_shutdown)
         {
             if (execution.query_slot->isReady())
             {
+                /// Cancellation can lose to dequeue while still `WaitingForResource`. Release the
+                /// granted slot before dispatching the task that records the cancelled attempt.
+                if (execution.interrupt_execution.load())
+                    execution.query_slot.reset();
+
                 /// Resolve admission before the coordination early returns as well: losing Keeper
                 /// capabilities or ownership must not strand an already-cancelled attempt.
                 execution_task->schedule();

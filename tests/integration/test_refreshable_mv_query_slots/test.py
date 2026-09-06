@@ -451,3 +451,59 @@ def test_query_slot_released_before_exchange():
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT x FROM mv") == "1\n"
     wait_metric(node, "ConcurrentQueryAcquired", 0)
+
+
+@pytest.mark.parametrize("enable_analyzer", [0, 1])
+@pytest.mark.parametrize("reset_scope", ["outer", "nested", "both"])
+def test_refresh_workload_overrides_default_reset(enable_analyzer, reset_scope):
+    create_workload(node)
+    outer_reset = ", workload=DEFAULT" if reset_scope in ("outer", "both") else ""
+    nested_reset = " SETTINGS workload=DEFAULT" if reset_scope in ("nested", "both") else ""
+    node.query(
+        "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
+        "SETTINGS refresh_retries=0 APPEND "
+        "(workload String, nested_workload String) ENGINE Memory EMPTY "
+        "AS SELECT getSetting('workload') AS workload, nested_workload FROM "
+        f"(SELECT getSetting('workload') AS nested_workload{nested_reset}) "
+        f"SETTINGS refresh_workload='all', enable_analyzer={enable_analyzer}{outer_reset}"
+    )
+    definition = node.query("SHOW CREATE TABLE mv")
+    with occupied_slot(node):
+        node.query("SYSTEM REFRESH VIEW mv")
+        wait_status(node, "WaitingForResource")
+        assert node.query("SELECT count() FROM mv") == "0\n"
+    node.query("SYSTEM WAIT VIEW mv", timeout=30)
+    assert node.query("SELECT workload, nested_workload FROM mv") == "all\tall\n"
+    assert node.query("SHOW CREATE TABLE mv") == definition
+    wait_metric(node, "ConcurrentQueryAcquired", 0)
+
+
+@pytest.mark.parametrize("operation", ["STOP", "PAUSE"])
+def test_cancel_after_grant_before_admission_resolution(operation):
+    create_workload(node)
+    create_view(node)
+    node.query("SYSTEM ENABLE FAILPOINT refresh_mv_skip_execution")
+    try:
+        with occupied_slot(node):
+            node.query("SYSTEM REFRESH VIEW mv")
+            wait_status(node, "WaitingForResource")
+            node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+            node.query(
+                "SYSTEM WAIT FAILPOINT refresh_mv_pause_before_admission_resolution PAUSE",
+                timeout=30,
+            )
+        # The scheduler has granted the slot, but RefreshTask is still WaitingForResource.
+        wait_metric(node, "ConcurrentQueryScheduled", 0)
+        wait_metric(node, "ConcurrentQueryAcquired", 1)
+        node.query(f"SYSTEM {operation} VIEW mv", timeout=30)
+        node.query("SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+        # RefreshExec is still suppressed, so it cannot hide a retained admission slot.
+        wait_metric(node, "ConcurrentQueryAcquired", 0)
+        assert node.query("SELECT count() FROM mv") == "0\n"
+        assert node.query("SELECT 1 SETTINGS workload='all'", timeout=10) == "1\n"
+    finally:
+        node.query("SYSTEM DISABLE FAILPOINT refresh_mv_pause_before_admission_resolution")
+        try:
+            node.query("DROP TABLE mv SYNC", timeout=30)
+        finally:
+            node.query("SYSTEM DISABLE FAILPOINT refresh_mv_skip_execution")
