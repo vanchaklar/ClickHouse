@@ -8,7 +8,28 @@ concurrency:
   group: rmv-preflight
   cancel-in-progress: true
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check Python regression tests
+        run: |
+          mkdir -p build-preflight
+          python3 -m pip install black==24.10.0 > build-preflight/python_setup.log 2>&1
+          python3 -m black --check --diff tests/integration/test_refreshable_mv_query_slots/test.py tests/integration/test_refreshable_mv_query_slot_starvation/test.py > build-preflight/python_style.log 2>&1
+          python3 -m compileall -q tests/integration/test_refreshable_mv_query_slots tests/integration/test_refreshable_mv_query_slot_starvation > build-preflight/python_syntax.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rmv-preflight-check-logs
+          path: build-preflight/*.log
+          retention-days: 3
   build:
+    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     steps:
