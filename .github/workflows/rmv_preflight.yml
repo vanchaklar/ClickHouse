@@ -5,7 +5,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: rmv-preflight
+  group: rmv-preflight-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   checks:
@@ -24,7 +24,7 @@ jobs:
           python3 -m compileall -q tests/integration/test_refreshable_mv_query_slots tests/integration/test_refreshable_mv_query_slot_starvation > build-preflight/python_syntax.log 2>&1
       - name: Show failure diagnostics
         if: failure()
-        run: tail -n 100 build-preflight/*.log
+        run: cat build-preflight/python_style.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -34,27 +34,73 @@ jobs:
   build:
     needs: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 330
+    timeout-minutes: 360
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/rmv-ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 1
           persist-credentials: false
+      # Reuses the fork's pr113506 scheduler CI cache structure.
+      - name: Identify exact source and dependency snapshots
+        id: snapshot
+        run: |
+          mkdir -p build-preflight
+          # Retain every root entry except tests/docs/GitHub metadata.
+          # The workflow is separately included in the binary cache key.
+          source_hash=$(git ls-tree HEAD | awk '$4 != "tests" && $4 != "docs" && $4 != ".github"' | sha256sum | cut -d ' ' -f 1)
+          echo "source=$source_hash" >> "$GITHUB_OUTPUT"
+          echo "contrib=$(git rev-parse HEAD:contrib)" >> "$GITHUB_OUTPUT"
+      - name: Restore exact server binary
+        id: binary-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build-preflight/programs/clickhouse
+          key: ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-binary-${{ steps.snapshot.outputs.source }}-${{ hashFiles('.github/workflows/rmv_preflight.yml') }}
+      - name: Restore compiler cache
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        id: compiler-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-ccache-${{ steps.snapshot.outputs.source }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-ccache-${{ steps.snapshot.outputs.source }}-
+            ${{ runner.os }}-${{ runner.arch }}-rmv-clang21-O1-v1-ccache-
+      - name: Restore shallow build dependencies
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        id: submodule-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ runner.os }}-${{ runner.arch }}-rmv-submodules-v1-${{ steps.snapshot.outputs.contrib }}-${{ hashFiles('ci/jobs/fast_test.py', '.gitmodules') }}
+      - name: Reclaim runner disk
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - name: Install compiler and build tools
+        if: steps.binary-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p build-preflight
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o build-preflight/llvm-key.asc
           sudo gpg --dearmor -o /usr/share/keyrings/llvm-preflight.gpg build-preflight/llvm-key.asc
-          echo 'deb [signed-by=/usr/share/keyrings/llvm-preflight.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm-preflight.list
+          echo 'deb [signed-by=/usr/share/keyrings/llvm-preflight.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' | sudo tee /etc/apt/sources.list.d/llvm-preflight.list
           sudo apt-get update > build-preflight/setup.log 2>&1
-          sudo apt-get install -y clang-22 lld-22 llvm-22 cmake ninja-build nasm yasm python3 > build-preflight/packages.log 2>&1
+          sudo apt-get install -y clang-21 lld-21 llvm-21 cmake ninja-build nasm yasm python3 ccache > build-preflight/packages.log 2>&1
           sudo apt-get clean
           sudo fallocate -l 16G /swap-rmv-preflight
           sudo chmod 600 /swap-rmv-preflight
           sudo mkswap /swap-rmv-preflight
           sudo swapon /swap-rmv-preflight
       - name: Fetch shallow build dependencies
+        if: steps.binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           python3 - <<'PY' > build-preflight/submodules.txt
@@ -68,11 +114,21 @@ jobs:
           git submodule sync > build-preflight/submodules.log 2>&1
           xargs git submodule init -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
           xargs -P 4 -n 1 git submodule update --depth 1 --single-branch -- < build-preflight/submodules.txt >> build-preflight/submodules.log 2>&1
+      - name: Save shallow build dependencies
+        if: steps.binary-cache.outputs.cache-hit != 'true' && steps.submodule-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            contrib
+            .git/modules/contrib
+          key: ${{ steps.submodule-cache.outputs.cache-primary-key }}
       - name: Configure reduced ClickHouse build
+        if: steps.binary-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cmake -S . -B build-preflight -G Ninja \
-            -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
+            -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS_RELEASE='-O1 -DNDEBUG' -DCMAKE_CXX_FLAGS_RELEASE='-O1 -DNDEBUG' \
             '-DCMAKE_JOB_POOLS=compile_pool=2;link_pool=1' \
@@ -84,10 +140,30 @@ jobs:
             -DENABLE_CLICKHOUSE_SELF_EXTRACTING=OFF \
             > build-preflight/configure.log 2>&1
       - name: Build
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 300
         shell: bash
         run: |
+          ccache --zero-stats
           cmake --build build-preflight --target clickhouse > build-preflight/build.log 2>&1
+      - name: Record and save compiler cache
+        if: always() && steps.binary-cache.outputs.cache-hit != 'true'
+        run: ccache --show-stats > build-preflight/ccache.log 2>&1
+      - uses: actions/cache/save@v4
+        if: always() && steps.binary-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.compiler-cache.outputs.cache-primary-key }}
+      - name: Smoke test server binary
+        run: |
+          chmod +x build-preflight/programs/clickhouse
           build-preflight/programs/clickhouse local --query "SELECT version()" > build-preflight/version.log 2>&1
+      - name: Save exact server binary
+        if: steps.binary-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-preflight/programs/clickhouse
+          key: ${{ steps.binary-cache.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@v4
         with:
           name: rmv-preflight-clickhouse
