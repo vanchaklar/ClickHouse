@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p build/results build/server-data
-bench_root="$(pwd)/build"
-cat > build/server.xml <<EOF
+bench_root="$(pwd)/${BENCH_DIR:-build}"
+mkdir -p "$bench_root/results" "$bench_root/server-data"
+cat > "$bench_root/server.xml" <<EOF
 <clickhouse>
   <logger><level>information</level><log>$bench_root/server.log</log><errorlog>$bench_root/server.err.log</errorlog><size>20M</size><count>2</count></logger>
   <http_port>18123</http_port><tcp_port>19000</tcp_port><listen_host>127.0.0.1</listen_host>
@@ -19,12 +19,12 @@ cat > build/server.xml <<EOF
   <query_log><database>system</database><table>query_log</table><flush_interval_milliseconds>1000</flush_interval_milliseconds></query_log>
 </clickhouse>
 EOF
-cat > build/users.xml <<'EOF'
+cat > "$bench_root/users.xml" <<'EOF'
 <clickhouse><profiles><default><max_threads>2</max_threads></default></profiles>
 <users><default><password></password><networks><ip>127.0.0.1</ip><ip>::1</ip></networks><profile>default</profile><quota>default</quota><access_management>1</access_management></default></users>
 <quotas><default><interval><duration>3600</duration><queries>0</queries><errors>0</errors><result_rows>0</result_rows><read_rows>0</read_rows><execution_time>0</execution_time></interval></default></quotas></clickhouse>
 EOF
-build/clickhouse server --config-file=build/server.xml > build/server-console.log 2>&1 &
+"${BENCH_BINARY:-build/clickhouse}" server --config-file="$bench_root/server.xml" > "$bench_root/server-console.log" 2>&1 &
 bench_server_pid=$!
 trap 'kill "$bench_server_pid" 2>/dev/null || true; wait "$bench_server_pid" 2>/dev/null || true' EXIT
 python3 - <<'PY'
@@ -37,5 +37,5 @@ for attempt in range(60):
         time.sleep(1)
 else: raise RuntimeError('Server failed to start')
 PY
-bench_log="build/test_benchmark_$(date -u +%Y%m%dT%H%M%S%N).log"
+bench_log="$bench_root/test_benchmark_$(date -u +%Y%m%dT%H%M%S%N).log"
 python3 benchmarks/time_decay/run.py "$@" > "$bench_log" 2>&1

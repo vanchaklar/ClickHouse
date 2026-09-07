@@ -23,6 +23,8 @@ P.add_argument('--sources', type=int, default=10000)
 P.add_argument('--targets', type=int, default=1000)
 P.add_argument('--repeats', type=int, default=3)
 P.add_argument('--out', default='build/results')
+P.add_argument('--mode', choices=['fork-on', 'fork-off', 'upstream'], default='fork-on')
+P.add_argument('--suite', choices=['full', 'comparison'], default='full')
 A = P.parse_args()
 OUT = pathlib.Path(A.out)
 OUT.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,11 @@ SETTINGS = dict(allow_experimental_time_decay_aggregate_functions=1,
                 exponential_time_decay_aggregate_function_calculation_budget=0,
                 max_threads=2, max_memory_usage=4000000000, max_execution_time=180,
                 use_query_cache=0, log_queries=1)
+if A.mode == 'upstream':
+    del SETTINGS['allow_experimental_time_decay_aggregate_functions']
+    del SETTINGS['exponential_time_decay_aggregate_function_calculation_budget']
+elif A.mode == 'fork-off':
+    SETTINGS['allow_experimental_time_decay_aggregate_functions'] = 0
 
 
 def sql(query, qid=None):
@@ -60,6 +67,8 @@ def check(name, actual, expected, approximate=False):
             for x, y in zip(actual, expected))
     differences = [dict(position=i, actual=x, expected=y) for i, (x, y) in enumerate(zip(actual, expected)) if x != y]
     CHECKS.append(dict(name=name, passed=good, actual=actual[:10], expected=expected[:10],
+        positional_accuracy=sum(x == y for x, y in zip(actual, expected))/max(1,len(expected)),
+        recall=len(set(map(str,actual)) & set(map(str,expected)))/max(1,len(set(map(str,expected)))),
         actual_count=len(actual), expected_count=len(expected), first_differences=differences[:20],
         actual_sha256=hashlib.sha256(json.dumps(actual).encode()).hexdigest(),
         expected_sha256=hashlib.sha256(json.dumps(expected).encode()).hexdigest()))
@@ -287,13 +296,22 @@ save('environment.json',dict(source_sha=os.environ.get('SOURCE_SHA'),database=DB
      version=sql('SELECT version()').strip(),build_options=rows('SELECT name,value FROM system.build_options'),
      cpu=pathlib.Path('/proc/cpuinfo').read_text(),memory=pathlib.Path('/proc/meminfo').read_text()))
 try:
-    candidate_counterexample()
-    for n in map(int,A.sizes.split(',')):
-        print('primitives',n,flush=True);primitives(n)
-    for f in [1,2,4,16,64]:
-        print('fragmentation',f,flush=True);storage(f)
-    for n in map(int,A.histories.split(',')):
-        print('history',n,flush=True);history(n)
+    from accuracy import run_accuracy, portable, indexed
+    run_accuracy(globals())
+    if A.suite == 'comparison':
+        for n in map(int,A.sizes.split(',')):
+            print('portable',n,flush=True);portable(globals(),n)
+        print('indexed layouts',flush=True);indexed(globals(),max(map(int,A.sizes.split(','))))
+    else:
+        if A.mode != 'fork-on':
+            raise ValueError('Full custom-type suite requires fork-on')
+        candidate_counterexample()
+        for n in map(int,A.sizes.split(',')):
+            print('primitives',n,flush=True);primitives(n)
+        for f in [1,2,4,16,64]:
+            print('fragmentation',f,flush=True);storage(f)
+        for n in map(int,A.histories.split(',')):
+            print('history',n,flush=True);history(n)
 finally:
     finish()
 if ERRORS:

@@ -1,0 +1,71 @@
+name: Time-decay accuracy and upstream comparison
+on:
+  push:
+    branches: ['bench/time-decay-accuracy-20260907']
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: benchmarks/time_decay
+      - uses: actions/cache@v4
+        id: binaries
+        with:
+          path: |
+            build/clickhouse
+            build/upstream-clickhouse
+          key: time-decay-pair-33f39cd7-3594fb13
+      - name: Download pinned release binaries
+        if: steps.binaries.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build
+          curl -fL --retry 3 'https://clickhouse-builds.s3.amazonaws.com/PRs/110934/33f39cd7762b2ecd57e770e3d7367e07857a51fa/pr/build_amd_release/clickhouse-common-static-26.9.1.1-amd64.tgz' -o build/fork.tgz
+          curl -fL --retry 3 'https://clickhouse-builds.s3.amazonaws.com/REFs/master/3594fb13167f4656d9421b90e2f0c5517a041300/masterci/build_amd_release/clickhouse-common-static-26.9.1.895-amd64.tgz' -o build/upstream.tgz
+          echo 'c49165c1c344f200a34efcf3ca218c585417f12001bd05e01b1909ed7a3f4f9a1a26f14ce807499939b8887b152691aec8776eba06e04ba213332c4c1ee11be3  build/fork.tgz' | sha512sum -c -
+          echo '997ec77cb3b68fe322e0a1683132efe9c991bcebbe237e2b06dc997d9f60741ee922ae434cbad2af261e14ac52c774fbf16965127c8e35756351c544f7be6864  build/upstream.tgz' | sha512sum -c -
+          tar --no-same-owner -xzf build/fork.tgz -C build --wildcards '*/usr/bin/clickhouse'
+          tar --no-same-owner -xzf build/upstream.tgz -C build --wildcards '*/usr/bin/clickhouse'
+          cp build/clickhouse-common-static-26.9.1.1/usr/bin/clickhouse build/clickhouse
+          cp build/clickhouse-common-static-26.9.1.895/usr/bin/clickhouse build/upstream-clickhouse
+          rm -rf build/clickhouse-common-static-* build/fork.tgz build/upstream.tgz
+      - name: Verify both binary identities
+        run: |
+          echo '609eb315d65ca2e5aafded9c07ca951d53bbb494b12188e5d08017420f022493  build/clickhouse' | sha256sum -c -
+          echo '9e5e0a826d532c50bc1ea91a473cbae3cf2a9e7107b4f19f6353a7a40edfe89d  build/upstream-clickhouse' | sha256sum -c -
+      - name: Run paired accuracy, window, index and projection comparisons
+        run: |
+          for mode in upstream fork-off fork-on; do
+            export BENCH_DIR="build/$mode"
+            export SOURCE_SHA=95627d85bb148c36357070442983df0c59037ebb
+            export BENCH_BINARY=build/clickhouse
+            if test "$mode" = upstream; then
+              export SOURCE_SHA=3594fb13167f4656d9421b90e2f0c5517a041300
+              export BENCH_BINARY=build/upstream-clickhouse
+            fi
+            bash benchmarks/time_decay/server.sh --mode "$mode" --suite comparison --sizes 1000,10000,100000,1000000 --repeats 3 --out "$BENCH_DIR/results"
+          done
+      - name: Rerun full feature matrix with accuracy metrics
+        env:
+          SOURCE_SHA: 95627d85bb148c36357070442983df0c59037ebb
+          BENCH_DIR: build/full
+        run: bash benchmarks/time_decay/server.sh --sizes 1000,10000,100000,1000000 --histories 1000000 --keys 10000 --repeats 3 --out build/full/results
+      - name: Publish comparison summary
+        if: always()
+        run: |
+          python3 benchmarks/time_decay/report.py build > build/comparison.md
+          cat build/comparison.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: time-decay-upstream-accuracy-${{ github.run_id }}
+          path: |
+            build/*/results/
+            build/*/*.log
+            build/comparison.md
+          retention-days: 30
