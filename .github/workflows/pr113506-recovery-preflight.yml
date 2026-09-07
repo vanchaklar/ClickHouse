@@ -67,6 +67,8 @@ jobs:
           #include <Columns/IColumn_fwd.h>
           #include <Common/ThreadStatus.h>
           #include <Processors/IProcessor.h>
+          #include <Poco/ConsoleChannel.h>
+          #include <Poco/Logger.h>
 
           namespace DB
           {
@@ -90,6 +92,8 @@ jobs:
 
           int main(int argc, char ** argv)
           {
+              /// Surface assertion descriptions and traces from re-executed death-test children.
+              Poco::Logger::root().setChannel(new Poco::ConsoleChannel);
               testing::InitGoogleTest(&argc, argv);
               return RUN_ALL_TESTS();
           }
@@ -140,8 +144,18 @@ jobs:
             --gtest_filter=SchedulerSpaceShared.Smoke:SchedulerSpaceShared.DetachingLimitCancelsQueuedSuction \
             > build/test_baseline_detach.log 2>&1
           detach_result=$?
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.EvictionProtectionIsLastFallback \
+            > build/test_baseline_eviction_order.log 2>&1
+          eviction_result=$?
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_death_test_style=threadsafe \
+            --gtest_filter=SchedulerSpaceShared.SiblingLimitsSharePolicySuctionSlot \
+            > build/test_baseline_sibling_precedence.log 2>&1
+          sibling_result=$?
           set -e
-          printf 'pressure_exit=%s\ndetach_exit=%s\n' "$pressure_result" "$detach_result" > build/baseline_results.txt
+          printf 'pressure_exit=%s\ndetach_exit=%s\neviction_exit=%s\nsibling_exit=%s\n' \
+            "$pressure_result" "$detach_result" "$eviction_result" "$sibling_result" > build/baseline_results.txt
 
       - name: Build patched tests
         id: patched
@@ -204,3 +218,4 @@ jobs:
             build/*.log
             build/*results.*
           retention-days: 7
+
