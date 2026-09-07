@@ -32,7 +32,7 @@ jobs:
       - name: Run repository style check
         run: |
           mkdir -p ci/tmp
-          python3 ./ci/jobs/scripts/workflow_hooks/store_data.py > store-data.log 2>&1
+          PYTHONPATH=./ci:. python3 ./ci/jobs/scripts/workflow_hooks/store_data.py > store-data.log 2>&1
           PYTHONPATH=./ci:. python3 ci/jobs/check_style.py > style.log 2>&1
 
       - name: Upload style logs
