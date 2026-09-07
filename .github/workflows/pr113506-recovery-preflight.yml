@@ -15,6 +15,8 @@ jobs:
   style:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -30,6 +32,7 @@ jobs:
       - name: Run repository style check
         run: |
           mkdir -p ci/tmp
+          python3 ./ci/jobs/scripts/workflow_hooks/store_data.py > store-data.log 2>&1
           PYTHONPATH=./ci:. python3 ci/jobs/check_style.py > style.log 2>&1
 
       - name: Upload style logs
@@ -39,6 +42,7 @@ jobs:
           name: pr113506-style
           path: |
             style-setup.log
+            store-data.log
             style.log
           retention-days: 7
 
@@ -248,4 +252,3 @@ jobs:
             build/*.log
             build/*results.*
           retention-days: 7
-
