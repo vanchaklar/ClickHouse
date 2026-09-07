@@ -78,7 +78,15 @@ def run_budget(g):
                     check(label+'_valid',[good],[True])
                     if path=='raw_control':
                         if budget==0:control=actual
-                        check(label+'_unchanged',actual,control)
+                        # Parallel partial-state merging changes Float64 rounding even
+                        # when the budget does not affect this raw-input overload.
+                        deltas=[abs(a['value']-b['value']) for a,b in zip(actual,control)]
+                        reports[-1]['max_raw_control_delta']=max(deltas)
+                        save('budget_accuracy.json',reports)
+                        check(label+'_unchanged',[
+                            len(actual)==len(control) and all(a['id']==b['id'] and
+                            math.isclose(a['value'],b['value'],rel_tol=1e-12,abs_tol=1e-12)
+                            for a,b in zip(actual,control))],[True])
                     measure(label,q,True)
         g['SETTINGS'][SETTING]=0
         sql(f'DROP TABLE {tab}')
