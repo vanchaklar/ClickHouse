@@ -15,6 +15,9 @@ The benchmark branch contains only the harness and workflow additions to that so
 - Primitive comparisons, full sorting and Top-K at 1K, 10K, 100K and 1M rows.
   Compare native values, `exponentialTimeDecayingValueAt`, and independent
   `Float64`/timestamp arithmetic; include negative, zero and positive values.
+  Construct values with `initializeAggregation` using the actual aggregate
+  implementation. Do not hand-encode values with SQL `log()`: its approximation
+  can change near-tie order relative to the original Float64 inputs.
 - Aggregate state creation and merging, checked against explicit exponential arithmetic.
 - Four `AggregatingMergeTree` layouts: identity order, `minmax` index, sorted
   projection, and both. A raw `MergeTree` holds the explicit arithmetic baseline.

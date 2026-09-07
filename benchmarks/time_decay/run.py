@@ -58,7 +58,9 @@ def check(name, actual, expected, approximate=False):
         good = len(actual) == len(expected) and all(
             x[0] == y[0] and math.isclose(x[1], y[1], rel_tol=1e-10, abs_tol=1e-10)
             for x, y in zip(actual, expected))
+    differences = [dict(position=i, actual=x, expected=y) for i, (x, y) in enumerate(zip(actual, expected)) if x != y]
     CHECKS.append(dict(name=name, passed=good, actual=actual[:10], expected=expected[:10],
+        actual_count=len(actual), expected_count=len(expected), first_differences=differences[:20],
         actual_sha256=hashlib.sha256(json.dumps(actual).encode()).hexdigest(),
         expected_sha256=hashlib.sha256(json.dumps(expected).encode()).hexdigest()))
     save('correctness.json', CHECKS)
@@ -102,7 +104,7 @@ def compare_queries(name, queries, explain=False):
 
 
 def decay(v, t):
-    return f"CAST(tuple(toFloat64(sign({v})), if({v}=0, 0., sign({v})*(({t})+600*log(abs({v})))), 600.), 'ExponentialTimeDecayingFloat64(600)')"
+    return f"initializeAggregation('exponentialTimeDecayingFloat64(600)', toFloat64({v}), toFloat64({t}))"
 
 
 def capability(name, action):
@@ -271,7 +273,7 @@ def finish():
         r['query_log_record_found'] = r['query_id'] in byid
     save('measurements.json',RESULTS)
     lines=['# Time-decay benchmark results','',f'Source: `{os.environ.get("SOURCE_SHA","unknown")}`',
-           f'{len(RESULTS)} timed queries; {len(CHECKS)} correctness checks; {len(ERRORS)} failed/unsupported cases.',
+           f'{len(RESULTS)} timed queries; {len(CHECKS)} correctness checks ({sum(not c['passed'] for c in CHECKS)} failed); {len(ERRORS)} failed/unsupported operations.',
            '', 'Candidate-first truncation is not exact on fragmented state (see candidate_warning.json).',
            'Timings are warm-cache single-runner measurements, not production capacity claims.',
            '', '| Case | Median seconds |', '|---|---:|']
