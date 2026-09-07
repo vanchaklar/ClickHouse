@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      CCACHE_DIR: ${{ runner.temp }}/pr113506-ccache
+      CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
       BASE_SHA: d3725cea24aa0f40908cefa07035b7822726bec6
     steps:
