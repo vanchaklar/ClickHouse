@@ -35,7 +35,7 @@ ERRORS = []
 SETTINGS = dict(allow_experimental_time_decay_aggregate_functions=1,
                 exponential_time_decay_aggregate_function_calculation_budget=0,
                 max_threads=2, max_memory_usage=4000000000, max_execution_time=180,
-                use_query_cache=0, log_queries=1)
+                use_query_cache=0, use_query_condition_cache=0, log_queries=1)
 if A.mode == 'upstream':
     del SETTINGS['allow_experimental_time_decay_aggregate_functions']
     del SETTINGS['exponential_time_decay_aggregate_function_calculation_budget']

@@ -112,10 +112,11 @@ def indexed(g,n=1000000):
                 sql(f'INSERT INTO {tab} SELECT {n}-number,0,0,{encode("number+1")} FROM numbers({lo},{count})')
             cases={
               'top100':f'SELECT id FROM {tab} WHERE model=0 AND source=0 ORDER BY d DESC,id LIMIT 100',
+              'ordered_top100':f'SELECT id FROM {tab} WHERE model=0 AND source=0 ORDER BY d DESC,id DESC LIMIT 100',
               'threshold':f'SELECT id FROM {tab} WHERE d>{encode(str(n-n//1000))} ORDER BY id'}
             for case,q in cases.items():
                 name=f'indexed_{n}_{family}_{layout}_{case}'
-                expected=[str(x) for x in range(1,(min(n,100) if case=='top100' else n//1000)+1)]
+                expected=[str(x) for x in range(1,(min(n,100) if case.endswith('top100') else n//1000)+1)]
                 check(name,ids(q),expected)
                 measure(name,q,True)
             save(f'indexed_{family}_{layout}_parts.json',g['rows'](f"SELECT count() parts,sum(rows) rows FROM system.parts WHERE database='{g['DB']}' AND table='indexed_{family}_{layout}' AND active"))

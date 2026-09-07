@@ -7,7 +7,7 @@ import sys
 root=pathlib.Path(sys.argv[1])
 print('# Accuracy and upstream comparison\n')
 print('PR head: `33f39cd7`; actual PR binary test-merge: `95627d85` (parents `0b7a0b77`, `33f39cd7`); upstream binary: `3594fb13`. Same runner, separate server data directories, two query threads, three warm repetitions. Different source baselines mean timing differences cannot be attributed solely to the PR.\n')
-print('Numerical oracle: 80-digit Decimal arithmetic on the exact Float64 inputs, 103 groups including cancellation and large magnitudes. L1 error divides absolute error by the sum of absolute input contributions. Relative error is undefined for zero truth.\n')
+print('Numerical oracle: 80-digit Decimal arithmetic on the exact Float64 inputs, 103 groups including cancellation and large magnitudes. L1 error divides absolute error by the sum of absolute input contributions. Relative error is undefined for zero truth. Query-result and predicate-result caches are disabled in all runs.\n')
 print('| Build / flag | Method | Max relative error | Max L1 error | Sign errors | Rank accuracy | Top-10 recall |\n|---|---|---:|---:|---:|---:|---:|')
 measurements={}
 for mode in ['upstream','fork-off','fork-on','full']:
@@ -35,4 +35,4 @@ for mode,m in measurements.items():
     for name in dict.fromkeys(r['name'] for r in m if r['name'].startswith('indexed_')):
         group=[r for r in m if r['name']==name]
         print(f'| {mode} | {name} | {statistics.median(r["wall_seconds"] for r in group)*1000:.3f} | {statistics.median(r["read_rows"] for r in group):g} | {statistics.median(r["selected_marks"] for r in group):g} | {any(r["projections"] for r in group)} |')
-print('\nExact indexed result identities are checked before timing; inspect the corresponding plans and query metrics for optimizer evidence. Flag-off rejection details are in `fork-off/results/flag_off.json`. Upstream has no custom decaying-type equivalent.\n')
+print('\nThe `ordered_top100` variant uses matching descending directions for score and identity so the ascending projection can be read backwards. The original `top100` keeps mixed directions as a control. Exact indexed result identities are checked before timing; inspect the corresponding plans and query metrics for optimizer evidence. Flag-off rejection details are in `fork-off/results/flag_off.json`. Upstream has no custom decaying-type equivalent.\n')

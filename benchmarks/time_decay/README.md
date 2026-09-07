@@ -84,6 +84,8 @@ Upstream has no experimental setting or custom decaying type; its portable basel
 uses existing window functions and ordinary `Float64` arithmetic. All modes use
 identical generated inputs, query-thread limits and warm-up/repetition counts.
 The differing source commits are a limitation when attributing performance changes.
+Both query-result and predicate-result caches are disabled, so a warm-up cannot
+mask skip-index benefits by remembering which granules fail a predicate.
 
 `accuracy.json` records absolute, relative and L1-normalized errors against an
 80-digit `Decimal` oracle for 103 groups, including negative timestamps, signed
@@ -96,6 +98,8 @@ while measuring the existing window and arithmetic paths normally.
 
 Selective layout cases insert one million rows into 16 separate score bands,
 query the highest 0.1% with a value predicate, and request score-ordered Top-100.
+Top-100 includes both a mixed-direction control (`d DESC, id ASC`) and a fully
+descending order (`d DESC, id DESC`) matching a reverse projection scan.
 Compare plain, `minmax`, sorted projection, and both, using both the native carrier
 and an upstream-compatible precomputed `Float64` score at time 1000. Read timings
 exclude score construction. Exact expected identities are checked; `EXPLAIN`, rows
