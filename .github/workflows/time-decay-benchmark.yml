@@ -1,0 +1,57 @@
+name: Time-decay end-to-end benchmark
+on:
+  push:
+    branches: ['bench/time-decay-20260907']
+permissions:
+  contents: read
+concurrency:
+  group: time-decay-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOURCE_SHA: 33f39cd7762b2ecd57e770e3d7367e07857a51fa
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: benchmarks/time_decay
+      - name: Restore pinned release binary
+        id: binary
+        uses: actions/cache@v4
+        with:
+          path: build/clickhouse
+          key: linux-x64-time-decay-release-33f39cd7762b2ecd57e770e3d7367e07857a51fa
+      - name: Download release artifact from successful current-head build
+        if: steps.binary.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build
+          curl -fL --retry 3 'https://clickhouse-builds.s3.amazonaws.com/PRs/110934/33f39cd7762b2ecd57e770e3d7367e07857a51fa/pr/build_amd_release/clickhouse-common-static-26.9.1.1-amd64.tgz' -o build/clickhouse.tgz
+          echo 'c49165c1c344f200a34efcf3ca218c585417f12001bd05e01b1909ed7a3f4f9a1a26f14ce807499939b8887b152691aec8776eba06e04ba213332c4c1ee11be3  build/clickhouse.tgz' | sha512sum -c -
+          tar --no-same-owner -xzf build/clickhouse.tgz -C build --wildcards '*/usr/bin/clickhouse'
+          cp build/clickhouse-common-static-26.9.1.1/usr/bin/clickhouse build/clickhouse
+          rm -rf build/clickhouse-common-static-26.9.1.1 build/clickhouse.tgz
+      - name: Verify binary identity
+        run: |
+          echo '609eb315d65ca2e5aafded9c07ca951d53bbb494b12188e5d08017420f022493  build/clickhouse' | sha256sum -c -
+          mkdir -p build/results
+          sha256sum build/clickhouse > build/results/binary.sha256
+          printf '%s\n' "$SOURCE_SHA" > build/results/source_sha.txt
+      - name: Run correctness checks and benchmark matrix
+        run: bash benchmarks/time_decay/server.sh --sizes 1000,10000,100000,1000000 --histories 1000000 --keys 10000 --repeats 3
+      - name: Publish run summary
+        if: always()
+        run: |
+          if test -f build/results/summary.md; then cat build/results/summary.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Upload metrics, query plans, correctness and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: time-decay-33f39cd7-${{ github.run_id }}
+          path: |
+            build/results/
+            build/*.log
+          retention-days: 14
