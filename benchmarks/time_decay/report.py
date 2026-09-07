@@ -6,6 +6,7 @@ import sys
 
 root=pathlib.Path(sys.argv[1])
 print('# Accuracy and upstream comparison\n')
+print('Calculation budget: **0 (cutoff disabled)** for every fork result below; **not supported** upstream. Nonzero-budget performance and accuracy are reported separately by `budget_report.py`.\n')
 print('PR head: `33f39cd7`; actual PR binary test-merge: `95627d85` (parents `0b7a0b77`, `33f39cd7`); upstream binary: `3594fb13`. Same runner, separate server data directories, two query threads, three warm repetitions. Different source baselines mean timing differences cannot be attributed solely to the PR.\n')
 print('Numerical oracle: 80-digit Decimal arithmetic on the exact Float64 inputs, 103 groups including cancellation and large magnitudes. L1 error divides absolute error by the sum of absolute input contributions. Relative error is undefined for zero truth. Query-result and predicate-result caches are disabled in all runs.\n')
 print('| Build / flag | Method | Max relative error | Max L1 error | Sign errors | Rank accuracy | Top-10 recall |\n|---|---|---:|---:|---:|---:|---:|')

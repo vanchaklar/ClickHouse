@@ -24,7 +24,8 @@ P.add_argument('--targets', type=int, default=1000)
 P.add_argument('--repeats', type=int, default=3)
 P.add_argument('--out', default='build/results')
 P.add_argument('--mode', choices=['fork-on', 'fork-off', 'upstream'], default='fork-on')
-P.add_argument('--suite', choices=['full', 'comparison'], default='full')
+P.add_argument('--suite', choices=['full', 'comparison', 'budget'], default='full')
+P.add_argument('--budgets', default='0,1,4,8,16')
 A = P.parse_args()
 OUT = pathlib.Path(A.out)
 OUT.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,7 @@ def check(name, actual, expected, approximate=False):
             for x, y in zip(actual, expected))
     differences = [dict(position=i, actual=x, expected=y) for i, (x, y) in enumerate(zip(actual, expected)) if x != y]
     CHECKS.append(dict(name=name, passed=good, actual=actual[:10], expected=expected[:10],
+        calculation_budget=SETTINGS.get('exponential_time_decay_aggregate_function_calculation_budget'),
         positional_accuracy=sum(x == y for x, y in zip(actual, expected))/max(1,len(expected)),
         recall=len(set(map(str,actual)) & set(map(str,expected)))/max(1,len(set(map(str,expected)))),
         actual_count=len(actual), expected_count=len(expected), first_differences=differences[:20],
@@ -97,7 +99,8 @@ def measure(name, query, explain=False):
         qid = DB + '_' + uuid.uuid4().hex
         start = time.perf_counter()
         sql(timed_query, qid)
-        RESULTS.append(dict(name=name, repeat=rep, query_id=qid, wall_seconds=time.perf_counter()-start))
+        RESULTS.append(dict(name=name, repeat=rep, query_id=qid, wall_seconds=time.perf_counter()-start,
+            calculation_budget=SETTINGS.get('exponential_time_decay_aggregate_function_calculation_budget')))
         save('measurements.json', RESULTS)
 
 
@@ -297,12 +300,16 @@ save('environment.json',dict(source_sha=os.environ.get('SOURCE_SHA'),database=DB
      cpu=pathlib.Path('/proc/cpuinfo').read_text(),memory=pathlib.Path('/proc/meminfo').read_text()))
 try:
     from accuracy import run_accuracy, portable, indexed
-    run_accuracy(globals())
-    if A.suite == 'comparison':
+    if A.suite == 'budget':
+        from budget import run_budget
+        run_budget(globals())
+    elif A.suite == 'comparison':
+        run_accuracy(globals())
         for n in map(int,A.sizes.split(',')):
             print('portable',n,flush=True);portable(globals(),n)
         print('indexed layouts',flush=True);indexed(globals(),max(map(int,A.sizes.split(','))))
     else:
+        run_accuracy(globals())
         if A.mode != 'fork-on':
             raise ValueError('Full custom-type suite requires fork-on')
         candidate_counterexample()

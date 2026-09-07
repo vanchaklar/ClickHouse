@@ -1,0 +1,53 @@
+name: Time-decay calculation budget and accuracy
+on:
+  push:
+    branches: ['bench/time-decay-budget-20260907']
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: benchmarks/time_decay
+      - uses: actions/cache@v4
+        id: binaries
+        with:
+          path: |
+            build/clickhouse
+            build/upstream-clickhouse
+          key: time-decay-pair-33f39cd7-3594fb13
+      - name: Download pinned release binary
+        if: steps.binaries.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p build
+          curl -fL --retry 3 'https://clickhouse-builds.s3.amazonaws.com/PRs/110934/33f39cd7762b2ecd57e770e3d7367e07857a51fa/pr/build_amd_release/clickhouse-common-static-26.9.1.1-amd64.tgz' -o build/fork.tgz
+          echo 'c49165c1c344f200a34efcf3ca218c585417f12001bd05e01b1909ed7a3f4f9a1a26f14ce807499939b8887b152691aec8776eba06e04ba213332c4c1ee11be3  build/fork.tgz' | sha512sum -c -
+          tar --no-same-owner -xzf build/fork.tgz -C build --wildcards '*/usr/bin/clickhouse'
+          cp build/clickhouse-common-static-26.9.1.1/usr/bin/clickhouse build/clickhouse
+          rm -rf build/clickhouse-common-static-* build/fork.tgz
+      - name: Verify binary identity
+        run: echo '609eb315d65ca2e5aafded9c07ca951d53bbb494b12188e5d08017420f022493  build/clickhouse' | sha256sum -c -
+      - name: Measure calculation-budget tradeoffs
+        env:
+          SOURCE_SHA: 95627d85bb148c36357070442983df0c59037ebb
+          BENCH_DIR: build/budget
+        run: bash benchmarks/time_decay/server.sh --suite budget --sizes 1000000 --budgets 0,1,4,8,16 --repeats 3 --out build/budget/results
+      - name: Publish budget summary
+        if: always()
+        run: |
+          python3 benchmarks/time_decay/budget_report.py build/budget/results > build/budget-summary.md
+          cat build/budget-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: time-decay-budget-${{ github.run_id }}
+          path: |
+            build/budget/results/
+            build/budget/*.log
+            build/budget-summary.md
+          retention-days: 30

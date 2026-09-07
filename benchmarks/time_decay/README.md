@@ -121,3 +121,10 @@ has 10K sources and 1,000 possible targets/source (configurable with `--sources`
 and `--targets`). Zipf distribution and realistic signed cancellation workloads
 still need separate extensions and runs. GitHub-hosted runner variability requires
 repeated independent runs before publishing stable performance conclusions.
+# Calculation-budget sweep
+
+All original results used calculation budget `0` (cutoff disabled); upstream does not expose this custom setting. New measurement, correctness, and numerical-accuracy records explicitly include `calculation_budget` (`null` when unsupported).
+
+The separate `time-decay-budget.yml` workflow compares budgets `0,1,4,8,16` on the same pinned PR binary. Nonzero values bound the calculation-index distance in decay lengths; they are neither error percentages nor execution-time limits. The suite measures native indexed inputs in forward and reverse order, eight-way state merging, and raw `(value,time)` inputs as an unaffected control. Positive and signed datasets each contain one million rows and 1,000 groups. An independent 80-digit Decimal oracle supplies numerical residuals, rank accuracy, and Top-K recall beside latency and speedup. Approximate results are reported without claiming the exact-mode accuracy guarantee.
+
+Run locally with `bash benchmarks/time_decay/server.sh --suite budget --sizes 1000000 --budgets 0,1,4,8,16 --repeats 3 --out build/results`, then `python3 benchmarks/time_decay/budget_report.py build/results`. This is a focused aggregate cutoff comparison; prior index/projection comparisons remain exact-budget controls.

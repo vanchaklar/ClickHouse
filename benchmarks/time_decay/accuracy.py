@@ -51,7 +51,7 @@ def run_accuracy(g):
                     sign_correct=(value>0)-(value<0)==(ref>0)-(ref<0)))
             order=[int(r['id']) for r in sorted(actual,key=lambda r:(-r['value'],int(r['id'])))]
             truth=sorted(expected,key=lambda k:(-expected[k],k))
-            report[label]=dict(samples=len(details),max_absolute_error=max(x['absolute_error'] for x in details),
+            report[label]=dict(samples=len(details),calculation_budget=g['SETTINGS'].get('exponential_time_decay_aggregate_function_calculation_budget'),max_absolute_error=max(x['absolute_error'] for x in details),
                 max_relative_error=max(x['relative_error'] for x in details if x['relative_error'] is not None),
                 max_l1_normalized_error=max(x['l1_normalized_error'] for x in details),
                 sign_errors=sum(not x['sign_correct'] for x in details),
