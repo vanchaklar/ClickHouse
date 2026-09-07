@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
+      STYLE_BASE_SHA: 7dc47a0080dac40d551e626c257267a9a8c42461
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,8 +33,41 @@ jobs:
       - name: Run repository style check
         run: |
           mkdir -p ci/tmp
+          git fetch --depth=1 origin "$STYLE_BASE_SHA" > style-fetch.log 2>&1
           PYTHONPATH=./ci:. python3 ./ci/jobs/scripts/workflow_hooks/store_data.py > store-data.log 2>&1
-          PYTHONPATH=./ci:. python3 ci/jobs/check_style.py > style.log 2>&1
+          PYTHONPATH=./ci:. python3 - <<'PY' > style.log 2>&1
+          import os
+          import runpy
+          import subprocess
+          from pathlib import Path
+
+          from ci.jobs.scripts.workflow_hooks.store_data import SETTINGS_HISTORY_FILE
+          from ci.jobs.scripts.workflow_hooks.store_data import parse_settings_history_changes
+          from ci.praktika.info import Info
+
+          base = os.environ["STYLE_BASE_SHA"]
+          changed_files = subprocess.run(
+              ["git", "diff", "--name-only", base, "HEAD"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          patch = subprocess.run(
+              ["git", "diff", "--unified=0", base, "HEAD", "--", SETTINGS_HISTORY_FILE],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout
+          file_lines = Path(SETTINGS_HISTORY_FILE).read_text().splitlines()
+
+          info = Info()
+          info.store_kv_data("changed_files", changed_files)
+          info.store_kv_data(
+              "settings_history_changed_settings",
+              parse_settings_history_changes(patch, file_lines),
+          )
+          runpy.run_path("ci/jobs/check_style.py", run_name="__main__")
+          PY
 
       - name: Upload style logs
         if: always()
@@ -42,6 +76,7 @@ jobs:
           name: pr113506-style
           path: |
             style-setup.log
+            style-fetch.log
             store-data.log
             style.log
           retention-days: 7
