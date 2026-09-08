@@ -423,6 +423,18 @@ bool FillingRightJoinSideTransform::spillOnSize(size_t bytes)
     return false;
 }
 
+const void * FillingRightJoinSideTransform::getMemoryReservationSpillTarget() const
+{
+    return join.get();
+}
+
+bool FillingRightJoinSideTransform::spillForMemoryReservation()
+{
+    if (auto * grace_join = typeid_cast<GraceHashJoin *>(join.get()))
+        return grace_join->spillForMemoryReservation();
+    return false;
+}
+
 bool FillingRightJoinSideTransform::hasPendingSpill() const
 {
     if (const auto * grace_join = typeid_cast<const GraceHashJoin *>(join.get()))

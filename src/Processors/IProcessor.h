@@ -396,6 +396,13 @@ public:
     /// implementations with shared spill state must also synchronize with its completion.
     virtual bool hasPendingSpill() const { return false; }
 
+    /// Execute a complete spill attempt without consuming input or producing output. This may be
+    /// called from another query thread while the processor is idle or executing; implementations
+    /// must serialize access to their spillable state. Return false when no spill is possible.
+    virtual bool spillForMemoryReservation() { return false; }
+    /// Processors sharing spillable state must return the same stable identity for that state.
+    virtual const void * getMemoryReservationSpillTarget() const { return this; }
+
 protected:
     /// May be called in parallel with work().
     virtual void onCancel() noexcept {}

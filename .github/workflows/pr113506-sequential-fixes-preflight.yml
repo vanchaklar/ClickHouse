@@ -1,4 +1,4 @@
-name: PR 113506 force-spill eligibility preflight
+name: PR 113506 dedicated recovery preflight
 
 on:
   push:
@@ -96,7 +96,7 @@ jobs:
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
-      BASE_SHA: 72eb89c66b22fa06fb611b55498f8a39981d15e9
+      BASE_SHA: 59868b21560e02e95d5a3452f7d5c41520126aa7
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,7 +107,7 @@ jobs:
         run: |
           mkdir -p build
           git fetch --depth=1 origin "$BASE_SHA" > build/fetch.log 2>&1
-          for path in src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/Nodes/SpaceShared/AllocationLimit.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp; do
+          for path in src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/MemoryReservation.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp src/Common/MemorySpillScheduler.cpp; do
             git show "$BASE_SHA:$path" > "$path"
           done
 
@@ -212,34 +212,38 @@ jobs:
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
           cmake --build build --target unit_test_space_shared_scheduler > build/build_baseline.log 2>&1
 
-      - name: Require the baseline to fail force-spill without protection
+      - name: Require baseline recovery to fail all new regressions
         run: |
-          set +e
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.ForceSpillWithoutEvictionProtection \
-            > build/test_baseline_force_only.log 2>&1
-          baseline_result=$?
-          set -e
-          printf 'force_only_exit=%s\n' "$baseline_result" > build/baseline_results.txt
-          test "$baseline_result" = 1
+          for test_name in DedicatedSpillVisitsSharedTargetOnce ForceSpillWithoutEvictionProtection EarlySuctionKeepsForcedSpillAlive RecoverySyncWaitsForDedicatedSpill DedicatedSpillNoProgressReachesEviction; do
+            set +e
+            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+              "--gtest_filter=SchedulerSpaceShared.$test_name" \
+              > "build/test_baseline_$test_name.log" 2>&1
+            baseline_result=$?
+            set -e
+            test "$baseline_result" = 1
+          done
           python3 - <<'PY_BASELINE_RESULT'
           from pathlib import Path
-          text = Path("build/test_baseline_force_only.log").read_text()
-          assert "processor.spillCallCount()" in text, text
-          assert "[  FAILED  ] SchedulerSpaceShared.ForceSpillWithoutEvictionProtection" in text, text
+          names = ["DedicatedSpillVisitsSharedTargetOnce","ForceSpillWithoutEvictionProtection","EarlySuctionKeepsForcedSpillAlive","RecoverySyncWaitsForDedicatedSpill","DedicatedSpillNoProgressReachesEviction"]
+          for name in names:
+              text = Path(f"build/test_baseline_{name}.log").read_text()
+              assert "[  FAILED  ] SchedulerSpaceShared." + name in text, text
           PY_BASELINE_RESULT
 
-      - name: Build corrected eligibility
+      - name: Build corrected recovery
         id: patched
         run: |
-          git restore --source=HEAD -- src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/Nodes/SpaceShared/AllocationLimit.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp
+          git restore --source=HEAD -- src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/MemoryReservation.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp src/Common/MemorySpillScheduler.cpp
           cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
 
-      - name: Run corrected force-spill regression
+      - name: Run corrected recovery regressions independently
         run: |
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.ForceSpillWithoutEvictionProtection \
-            > build/test_corrected_force_only.log 2>&1
+          for test_name in DedicatedSpillVisitsSharedTargetOnce ForceSpillWithoutEvictionProtection EarlySuctionKeepsForcedSpillAlive RecoverySyncWaitsForDedicatedSpill DedicatedSpillNoProgressReachesEviction; do
+            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+              "--gtest_filter=SchedulerSpaceShared.$test_name" \
+              > "build/test_corrected_$test_name.log" 2>&1
+          done
 
       - name: Compile the actual executor and join call sites
         run: |
@@ -248,7 +252,7 @@ jobs:
           from pathlib import Path
           import subprocess
           targets = [line.split(":", 1)[0] for line in Path("build/ninja_targets.log").read_text().splitlines()]
-          suffixes = ["/Runtime/ExecutionThreadContext.cpp.o", "/Runtime/ExecutingGraph.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
+          suffixes = ["/Runtime/ExecutionThreadContext.cpp.o", "/Runtime/ExecutingGraph.cpp.o", "/Runtime/PipelineExecutor.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
           for suffix in suffixes:
               matches = [target for target in targets if target.endswith(suffix)]
               if len(matches) != 1:
@@ -257,7 +261,7 @@ jobs:
                   subprocess.run(["ninja", "-C", "build", matches[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
           PY_TARGET
 
-      - name: Run complete 81-case scheduler suite together
+      - name: Run complete 90-case scheduler suite together
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
         run: |
           timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
@@ -265,13 +269,13 @@ jobs:
           python3 - <<'PY_SUITE_COUNT'
           from pathlib import Path
           text = Path("build/test_suite.log").read_text()
-          assert "[  PASSED  ] 81 tests." in text, text
+          assert "[  PASSED  ] 90 tests." in text, text
           PY_SUITE_COUNT
 
       - name: Print build and test failure diagnostics
         if: failure()
         run: |
-          for log in build/configure.log build/build_*.log build/test_baseline_force_only.log build/test_corrected_force_only.log build/test_suite.log build/test_results.tsv; do
+          for log in build/configure.log build/build_*.log build/test_baseline_*.log build/test_corrected_*.log build/test_suite.log build/test_results.tsv; do
             if test -f "$log"; then
               tail -n 100 "$log"
             fi

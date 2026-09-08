@@ -2043,6 +2043,7 @@ public:
 
     void work() override
     {
+        ++work_calls;
         if (spill_pending && !spill_blocked)
         {
             ++completed_spills;
@@ -2055,6 +2056,22 @@ public:
     size_t lastSpillSize() const { return last_spill_size; }
     bool hasPendingSpill() const override { return spill_pending; }
     void setSpillBlocked(bool blocked) { spill_blocked = blocked; }
+    size_t workCallCount() const { return work_calls; }
+    void runOnDedicatedSpill(std::function<void()> callback) { on_dedicated_spill = std::move(callback); }
+    void setSpillTarget(const void * target) { spill_target = target; }
+    const void * getMemoryReservationSpillTarget() const override { return spill_target ? spill_target : this; }
+
+    bool spillForMemoryReservation() override
+    {
+        ++spill_calls;
+        if (on_dedicated_spill)
+            on_dedicated_spill();
+        if (!spill_succeeds || spill_blocked || spillable_bytes <= 0)
+            return false;
+        spill_pending = false;
+        ++completed_spills;
+        return true;
+    }
 
 private:
     Int64 spillable_bytes;
@@ -2064,7 +2081,112 @@ private:
     size_t completed_spills = 0;
     bool spill_pending = false;
     bool spill_blocked = false;
+    size_t work_calls = 0;
+    std::function<void()> on_dedicated_spill;
+    const void * spill_target = nullptr;
 };
+
+TEST(SchedulerSpaceShared, DedicatedSpillVisitsSharedTargetOnce)
+{
+    MemorySpillScheduler scheduler(false);
+    ManualSpillProcessor first(4096, true);
+    ManualSpillProcessor second(4096, true);
+    first.setSpillTarget(&scheduler);
+    second.setSpillTarget(&scheduler);
+    scheduler.registerProcessor(&first);
+    scheduler.registerProcessor(&second);
+    const auto request = scheduler.requestForcedSpill();
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(first.spillCallCount() + second.spillCallCount(), 1u);
+    EXPECT_EQ(scheduler.getForcedSpillResult(request.epoch).outcome,
+        MemorySpillScheduler::ForcedSpillOutcome::Progress);
+}
+
+TEST(SchedulerSpaceShared, ForcedSpillVisitsIdleProcessorsWithoutWork)
+{
+    MemorySpillScheduler scheduler(false);
+    ManualSpillProcessor first(4096, true);
+    ManualSpillProcessor second(8192, true);
+    scheduler.registerProcessor(&first);
+    scheduler.registerProcessor(&second);
+    const auto request = scheduler.requestForcedSpill();
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(first.completedSpillCount(), 1u);
+    EXPECT_EQ(second.completedSpillCount(), 1u);
+    EXPECT_EQ(first.workCallCount(), 0u);
+    EXPECT_EQ(second.workCallCount(), 0u);
+    EXPECT_EQ(scheduler.getForcedSpillResult(request.epoch).outcome,
+        MemorySpillScheduler::ForcedSpillOutcome::Progress);
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(first.spillCallCount(), 1u);
+    EXPECT_EQ(second.spillCallCount(), 1u);
+}
+
+TEST(SchedulerSpaceShared, DedicatedSpillReportsNoProgress)
+{
+    MemorySpillScheduler scheduler(false);
+    ManualSpillProcessor processor(4096, false);
+    scheduler.registerProcessor(&processor);
+    const auto request = scheduler.requestForcedSpill();
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(processor.spillCallCount(), 1u);
+    EXPECT_EQ(processor.workCallCount(), 0u);
+    EXPECT_EQ(scheduler.getForcedSpillResult(request.epoch).outcome,
+        MemorySpillScheduler::ForcedSpillOutcome::NoProgress);
+}
+
+TEST(SchedulerSpaceShared, DedicatedSpillSkipsExpiredProcessors)
+{
+    MemorySpillScheduler scheduler(false);
+    auto processor = std::make_shared<ManualSpillProcessor>(4096, true);
+    scheduler.registerProcessor(processor);
+    const auto request = scheduler.requestForcedSpill();
+    processor.reset();
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(scheduler.getForcedSpillResult(request.epoch).outcome,
+        MemorySpillScheduler::ForcedSpillOutcome::NoProgress);
+}
+
+TEST(SchedulerSpaceShared, DedicatedSpillRetainsProcessorDuringRemoval)
+{
+    MemorySpillScheduler scheduler(false);
+    auto processor = std::make_shared<ManualSpillProcessor>(4096, true);
+    std::weak_ptr<IProcessor> lifetime = processor;
+    std::promise<void> started;
+    auto started_future = started.get_future();
+    std::promise<void> release;
+    auto release_future = release.get_future();
+    processor->runOnDedicatedSpill([&]
+    {
+        started.set_value();
+        release_future.get();
+    });
+    scheduler.registerProcessor(processor);
+    const auto request = scheduler.requestForcedSpill();
+    auto spill = std::async(std::launch::async, [&] { scheduler.executeForcedSpill(request.epoch); });
+    EXPECT_EQ(started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    scheduler.remove(processor.get());
+    processor.reset();
+    EXPECT_FALSE(lifetime.expired());
+    release.set_value();
+    spill.get();
+    EXPECT_TRUE(lifetime.expired());
+}
+
+TEST(SchedulerSpaceShared, DedicatedSpillIncludesProcessorsAddedDuringPass)
+{
+    MemorySpillScheduler scheduler(false);
+    auto first = std::make_shared<ManualSpillProcessor>(4096, true);
+    auto added = std::make_shared<ManualSpillProcessor>(8192, true);
+    first->runOnDedicatedSpill([&] { scheduler.registerProcessor(added); });
+    scheduler.registerProcessor(first);
+    const auto request = scheduler.requestForcedSpill();
+    scheduler.executeForcedSpill(request.epoch);
+    EXPECT_EQ(first->completedSpillCount(), 1u);
+    EXPECT_EQ(added->completedSpillCount(), 1u);
+    EXPECT_EQ(scheduler.getForcedSpillResult(request.epoch).outcome,
+        MemorySpillScheduler::ForcedSpillOutcome::Progress);
+}
 
 
 /// Grace hash join only arms its spill in the callback. Another worker must not observe completion
@@ -2202,18 +2324,131 @@ TEST(SchedulerSpaceShared, ForceSpillWithoutEvictionProtection)
     tracker.adjustWithUntrackedMemory(8000);
     reservation.syncWithMemoryTracker(&tracker);
     ManualAllocation competitor(queue, "competitor", 1000);
+    processor.runOnDedicatedSpill([&] { tracker.adjustWithUntrackedMemory(-4000); });
 
     tracker.adjustWithUntrackedMemory(3000);
     auto growth = std::async(std::launch::async, [&] { reservation.syncWithMemoryTracker(&tracker); });
     EXPECT_EQ(growth.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_NO_THROW(growth.get());
 
-    scheduler->checkAndSpill(&processor);
     EXPECT_EQ(processor.spillCallCount(), 1u);
     EXPECT_FALSE(reservation.isProtectedFromEviction());
-    processor.work();
-    scheduler->finishSpill(&processor);
-    tracker.adjustWithUntrackedMemory(-11000);
+    EXPECT_EQ(processor.workCallCount(), 0u);
+    EXPECT_EQ(tracker.get(), 7000);
+    tracker.adjustWithUntrackedMemory(-tracker.get());
+}
+
+TEST(SchedulerSpaceShared, EarlySuctionKeepsForcedSpillAlive)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+    ResourceLink link;
+    link.allocation_queue = queue;
+    MemoryTracker tracker;
+    auto scheduler = std::make_shared<MemorySpillScheduler>(false);
+    auto processor = std::make_shared<ManualSpillProcessor>(4096, true);
+    scheduler->registerProcessor(processor);
+    MemoryReservation::Settings settings;
+    settings.force_spill_before_eviction = true;
+    settings.pressure_policy = protectedFromEvictionPolicy(0);
+    MemoryReservation reservation(link, "requester", 0, settings);
+    reservation.setMemorySpillScheduler(scheduler);
+    tracker.adjustWithUntrackedMemory(3000);
+    reservation.syncWithMemoryTracker(&tracker);
+    ManualAllocation competitor(queue, "competitor", 7000, true, protectedFromEvictionPolicy());
+    processor->runOnDedicatedSpill([&]
+    {
+        /// Early suction remains able to select a victim while the forced pass is running.
+        EXPECT_TRUE(competitor.waitKillsFor(1, std::chrono::seconds(5)));
+        tracker.adjustWithUntrackedMemory(-3000);
+    });
+    tracker.adjustWithUntrackedMemory(3000);
+    auto growth = std::async(std::launch::async, [&] { reservation.syncWithMemoryTracker(&tracker); });
+    EXPECT_EQ(growth.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    /// Also release the victim on failure, so the original implementation can finish the test.
+    competitor.decreaseAsync(7000);
+    competitor.waitSynced();
+    EXPECT_NO_THROW(growth.get());
+    EXPECT_EQ(processor->spillCallCount(), 1u);
+    EXPECT_EQ(processor->workCallCount(), 0u);
+    tracker.adjustWithUntrackedMemory(-tracker.get());
+}
+
+TEST(SchedulerSpaceShared, RecoverySyncWaitsForDedicatedSpill)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+    ResourceLink link;
+    link.allocation_queue = queue;
+    MemoryTracker tracker;
+    auto scheduler = std::make_shared<MemorySpillScheduler>(false);
+    auto processor = std::make_shared<ManualSpillProcessor>(4096, true);
+    scheduler->registerProcessor(processor);
+    MemoryReservation::Settings settings;
+    settings.force_spill_before_eviction = true;
+    settings.pressure_policy.max_allocation_before_suction_bytes = 1;
+    MemoryReservation reservation(link, "requester", 0, settings);
+    reservation.setMemorySpillScheduler(scheduler);
+    tracker.adjustWithUntrackedMemory(8000);
+    reservation.syncWithMemoryTracker(&tracker);
+    ManualAllocation competitor(queue, "competitor", 1000);
+    std::promise<void> started;
+    auto started_future = started.get_future();
+    std::promise<void> release;
+    auto release_future = release.get_future();
+    processor->runOnDedicatedSpill([&]
+    {
+        started.set_value();
+        release_future.get();
+        tracker.adjustWithUntrackedMemory(-4000);
+    });
+    tracker.adjustWithUntrackedMemory(3000);
+    auto growth = std::async(std::launch::async, [&] { reservation.syncWithMemoryTracker(&tracker); });
+    EXPECT_EQ(started_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(growth.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    auto other_worker = std::async(std::launch::async, [&] { reservation.syncWithMemoryTracker(&tracker); });
+    release.set_value();
+    EXPECT_NO_THROW(growth.get());
+    EXPECT_NO_THROW(other_worker.get());
+    EXPECT_EQ(processor->completedSpillCount(), 1u);
+    EXPECT_EQ(processor->workCallCount(), 0u);
+    EXPECT_EQ(tracker.get(), 7000);
+    tracker.adjustWithUntrackedMemory(-tracker.get());
+}
+
+TEST(SchedulerSpaceShared, DedicatedSpillNoProgressReachesEviction)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+    ResourceLink link;
+    link.allocation_queue = queue;
+    MemoryTracker tracker;
+    auto scheduler = std::make_shared<MemorySpillScheduler>(false);
+    auto processor = std::make_shared<ManualSpillProcessor>(4096, false);
+    scheduler->registerProcessor(processor);
+    MemoryReservation::Settings settings;
+    settings.force_spill_before_eviction = true;
+    settings.pressure_policy.max_allocation_before_suction_bytes = 1;
+    MemoryReservation reservation(link, "requester", 0, settings);
+    reservation.setMemorySpillScheduler(scheduler);
+    tracker.adjustWithUntrackedMemory(8000);
+    reservation.syncWithMemoryTracker(&tracker);
+    tracker.adjustWithUntrackedMemory(3000);
+    auto growth = std::async(std::launch::async, [&] { reservation.syncWithMemoryTracker(&tracker); });
+    EXPECT_EQ(growth.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_THROW(growth.get(), DB::Exception);
+    EXPECT_EQ(processor->spillCallCount(), 1u);
+    EXPECT_EQ(processor->workCallCount(), 0u);
+    tracker.adjustWithUntrackedMemory(-tracker.get());
 }
 
 /// Queue entry starts one spill epoch. Re-observation cannot open another epoch, and suction is
