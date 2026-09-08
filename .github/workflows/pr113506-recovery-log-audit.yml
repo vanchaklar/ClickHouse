@@ -1,0 +1,47 @@
+name: PR 113506 recovery log audit
+
+on:
+  push:
+    branches: ['ci/pr113506-recovery-log-audit-20260908']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Read completed recovery logs
+        uses: actions/download-artifact@v4
+        with:
+          name: pr113506-spill-work-preflight
+          path: build
+          run-id: 34209664564
+          github-token: ${{ github.token }}
+
+      - name: Print and verify regression evidence
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("build")
+          names = ["DedicatedSpillVisitsSharedTargetOnce","ForceSpillWithoutEvictionProtection","EarlySuctionKeepsForcedSpillAlive","RecoverySyncWaitsForDedicatedSpill","DedicatedSpillNoProgressReachesEviction"]
+          for name in names:
+              for variant in ["baseline", "corrected"]:
+                  matches = list(root.rglob(f"test_{variant}_{name}.log"))
+                  assert len(matches) == 1, matches
+                  text = matches[0].read_text()
+                  print(f"===== {matches[0].name} =====\n{text}", flush=True)
+                  marker = "[  FAILED  ] " if variant == "baseline" else "[       OK ] "
+                  assert marker + "SchedulerSpaceShared." + name in text, text
+          suite = list(root.rglob("test_suite.log"))
+          assert len(suite) == 1, suite
+          text = suite[0].read_text()
+          print(f"===== {suite[0].name} =====\n{text}", flush=True)
+          assert "[  PASSED  ] 90 tests." in text, text
+          for path in sorted(root.rglob("build_*.log")):
+              lines = path.read_text().splitlines()
+              print(f"===== {path.name}: {len(lines)} lines; final diagnostics =====", flush=True)
+              print("\n".join(lines[-30:]), flush=True)
+          PY
