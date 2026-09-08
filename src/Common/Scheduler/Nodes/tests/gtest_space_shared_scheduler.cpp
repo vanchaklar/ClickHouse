@@ -2849,6 +2849,32 @@ TEST(SchedulerSpaceShared, DetachingLimitCancelsQueuedSuction)
 /// Removing the queue that owns the parked request releases its memory and must immediately retry
 /// requests hidden in surviving siblings. The old pressure episode must not remain attached to the
 /// detached owner.
+/// Removing a parked owner releases its allocation only after its pending growth has been
+/// cancelled. Requests hidden behind that growth must be retried when the removal decrease lands.
+TEST(SchedulerSpaceShared, RemovingParkedOwnerRetriesHiddenSameQueueRequest)
+{
+    SpaceSharedTest t;
+    SpaceSharedResourceHolder r(t);
+    r.addLimit("/", 10000);
+    AllocationQueue * queue = r.addQueue("/queue");
+    r.registerResource();
+
+    auto heavy = std::make_unique<ManualAllocation>(
+        queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
+    heavy->protectAfterPressureRounds(1);
+    heavy->increaseAsync(5000);
+    auto blocked = std::make_unique<ManualAllocation>(
+        queue, "blocked", 3000, /* wait_for_admission = */ false);
+
+    ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
+    heavy.reset();
+
+    ASSERT_TRUE(blocked->waitSyncedFor(std::chrono::seconds(5)))
+        << "Request remained hidden after the parked owner released its allocation";
+    EXPECT_EQ(blocked->size(), 3000);
+}
+
+
 TEST(SchedulerSpaceShared, DetachingParkedOwnerRetriesSurvivingSibling)
 {
     SpaceSharedTest t;

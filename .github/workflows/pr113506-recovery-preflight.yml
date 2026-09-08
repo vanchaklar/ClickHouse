@@ -88,6 +88,7 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
       BASE_SHA: d3725cea24aa0f40908cefa07035b7822726bec6
+      OWNER_REMOVAL_BASE_SHA: ee556158bd7339227bd918ae037e24983e9edf4e
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,7 +99,8 @@ jobs:
         run: |
           mkdir -p build
           cp src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp build/scheduler_tests_patched.cpp
-          git fetch --depth=1 origin "$BASE_SHA" > build/fetch.log 2>&1
+          cp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp build/allocation_queue_patched.cpp
+          git fetch --depth=1 origin "$BASE_SHA" "$OWNER_REMOVAL_BASE_SHA" > build/fetch.log 2>&1
           git show "$BASE_SHA:src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp" > src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
 
       - name: Restore compiler cache
@@ -233,10 +235,26 @@ jobs:
           printf 'pressure_exit=%s\ndetach_exit=%s\neviction_exit=%s\nsibling_exit=%s\n' \
             "$pressure_result" "$detach_result" "$eviction_result" "$sibling_result" > build/baseline_results.txt
 
+      - name: Reproduce parked-owner removal baseline
+        run: |
+          cp build/scheduler_tests_patched.cpp src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          git show "$OWNER_REMOVAL_BASE_SHA:src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp" \
+            > src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp
+          cmake --build build --target unit_test_space_shared_scheduler \
+            > build/build_owner_removal_baseline.log 2>&1
+          set +e
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.RemovingParkedOwnerRetriesHiddenSameQueueRequest \
+            > build/test_baseline_owner_removal.log 2>&1
+          owner_removal_result=$?
+          set -e
+          printf 'owner_removal_exit=%s\n' "$owner_removal_result" > build/owner_removal_baseline_result.txt
+          test "$owner_removal_result" -ne 0
+
       - name: Build patched tests
         id: patched
         run: |
-          cp build/scheduler_tests_patched.cpp src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          cp build/allocation_queue_patched.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp
           cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
 
       - name: Run all scheduler cases independently
@@ -256,8 +274,8 @@ jobs:
                   suite = line.strip()
               elif suite and line.startswith("  "):
                   tests.append(suite + line.strip().split()[0])
-          if len(tests) != 73:
-              raise RuntimeError(f"Expected 73 scheduler tests, found {len(tests)}")
+          if len(tests) != 74:
+              raise RuntimeError(f"Expected 74 scheduler tests, found {len(tests)}")
           failed = []
           results = []
           for name in tests:
