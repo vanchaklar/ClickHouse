@@ -83,13 +83,13 @@ def create_workload(instance, max_waiting=10):
     )
 
 
-def create_view(instance, name="mv", workload="all", setting="refresh_workload"):
+def create_view(instance, name="mv", workload="all"):
     instance.query(
         f"CREATE MATERIALIZED VIEW {name} REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND "
         "(workload String, x UInt64) ENGINE Memory EMPTY "
         "AS SELECT getSetting('workload') AS workload, toUInt64(1) AS x "
-        f"SETTINGS {setting}='{workload}'",
+        f"SETTINGS workload='{workload}'",
         timeout=30,
     )
 
@@ -124,7 +124,7 @@ def occupied_slot(instance, workload="all"):
 
 def test_default_off_preserves_select_workload():
     create_workload(legacy)
-    create_view(legacy, setting="workload")
+    create_view(legacy)
     assert legacy.query(
         "SELECT value FROM system.server_settings "
         "WHERE name='use_query_slot_to_refresh_materialized_view'"
@@ -136,60 +136,10 @@ def test_default_off_preserves_select_workload():
         assert metric(legacy, "ConcurrentQueryScheduled") == "0"
 
 
-def test_refresh_workload_with_admission_disabled():
-    create_workload(legacy)
-    with occupied_slot(legacy):
-        assert legacy.query(
-            "SELECT getSetting('workload') SETTINGS refresh_workload='all'", timeout=10
-        ) == "default\n"
-        create_view(legacy)
-        legacy.query("SYSTEM REFRESH VIEW mv")
-        legacy.query("SYSTEM WAIT VIEW mv", timeout=30)
-        assert legacy.query("SELECT workload FROM mv") == "all\n"
-        assert metric(legacy, "ConcurrentQueryScheduled") == "0"
 
-
-@pytest.mark.parametrize("replicated", [False, True])
-def test_refresh_workload_separates_create_from_refresh(replicated):
-    node.query(
-        "CREATE RESOURCE query (QUERY);"
-        "CREATE WORKLOAD all;"
-        "CREATE WORKLOAD original IN all;"
-        "CREATE WORKLOAD updated IN all SETTINGS max_concurrent_queries=1"
-    )
-    engine = (
-        "Replicated('/test/rmv_query_slots/create', 's', 'r')"
-        if replicated else "Atomic"
-    )
-    node.query(f"CREATE DATABASE rmv_slots ENGINE={engine}", timeout=30)
-    with occupied_slot(node, workload="updated"):
-        # Both the outer CREATE and its replicated DDL execution use original. The only
-        # runtime slot is occupied, but creating the view must still complete.
-        node.query(
-            "CREATE MATERIALIZED VIEW rmv_slots.mv REFRESH EVERY 1 YEAR "
-            "SETTINGS refresh_retries=0 APPEND (workload String, x UInt64) ENGINE Memory EMPTY "
-            "AS SELECT workload, toUInt64(1) AS x FROM "
-            "(SELECT getSetting('workload') AS workload SETTINGS workload='original') "
-            "SETTINGS workload='original', refresh_workload='updated'",
-            timeout=30,
-        )
-        definition = node.query("SHOW CREATE TABLE rmv_slots.mv")
-        wait_metric(node, "ConcurrentQueryAcquired", 1)
-        assert metric(node, "ConcurrentQueryScheduled") == "0"
-        node.query("SYSTEM REFRESH VIEW rmv_slots.mv")
-        wait_status(node, "WaitingForResource", database="rmv_slots")
-        assert node.query("SELECT count() FROM rmv_slots.mv") == "0\n"
-    node.query("SYSTEM WAIT VIEW rmv_slots.mv", timeout=30)
-    # Reapplying outer or nested SELECT settings must not restore the CREATE workload.
-    assert node.query("SELECT workload, x FROM rmv_slots.mv") == "updated\t1\n"
-    assert node.query("SHOW CREATE TABLE rmv_slots.mv") == definition
-    wait_metric(node, "ConcurrentQueryAcquired", 0)
-
-
-@pytest.mark.parametrize("setting", ["workload", "refresh_workload"])
-def test_async_admission_uses_select_workload(setting):
+def test_async_admission_uses_select_workload():
     create_workload(node)
-    create_view(node, setting=setting)
+    create_view(node)
     with occupied_slot(node):
         node.query("SYSTEM REFRESH VIEW mv")
         wait_status(node, "WaitingForResource")
@@ -273,7 +223,7 @@ def test_pause_allows_running_refresh_to_finish():
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT sum(sleepEachRow(1)) AS x FROM numbers(10) "
-        "SETTINGS refresh_workload='all', max_threads=1, max_block_size=1"
+        "SETTINGS workload='all', max_threads=1, max_block_size=1"
     )
     node.query("SYSTEM REFRESH VIEW mv")
     # Running also covers the short dispatch window. The process-list entry proves that
@@ -317,7 +267,7 @@ def test_workload_change_while_queued_requires_new_admission():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(1) AS x SETTINGS refresh_workload='updated'"
+            "toUInt64(1) AS x SETTINGS workload='updated'"
         )
     error = node.query_and_get_error("SYSTEM WAIT VIEW mv", timeout=30)
     assert "Refresh workload changed" in error
@@ -336,7 +286,7 @@ def test_select_change_while_queued_uses_fresh_definition():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(2) AS x SETTINGS refresh_workload='all'"
+            "toUInt64(2) AS x SETTINGS workload='all'"
         )
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT workload, x FROM mv") == "all\t2\n"
@@ -381,9 +331,8 @@ def test_detach_clears_running_znode_without_session_expiry():
     )
     keeper = cluster.get_kazoo_client("zoo1")
     try:
+        create_view(node, "rmv_slots.mv")
         with occupied_slot(node):
-            # Replicated CREATE must not request a slot from the full runtime workload.
-            create_view(node, "rmv_slots.mv")
             view_uuid = node.query(
                 "SELECT uuid FROM system.tables WHERE database='rmv_slots' AND name='mv'"
             ).strip()
@@ -434,7 +383,7 @@ def test_query_slot_released_before_exchange():
     node.query(
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 (x UInt64) ENGINE Memory EMPTY "
-        "AS SELECT toUInt64(1) AS x SETTINGS refresh_workload='all'"
+        "AS SELECT toUInt64(1) AS x SETTINGS workload='all'"
     )
     node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_exchange")
     try:
