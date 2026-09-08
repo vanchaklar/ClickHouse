@@ -1,4 +1,4 @@
-name: PR 113506 spill-work completion preflight
+name: PR 113506 deferred spill completion preflight
 
 on:
   push:
@@ -69,6 +69,15 @@ jobs:
           runpy.run_path("ci/jobs/check_style.py", run_name="__main__")
           PY
 
+      - name: Print style failure diagnostics
+        if: failure()
+        run: |
+          for log in style-fetch.log store-data.log style.log; do
+            if test -f "$log"; then
+              tail -n 180 "$log"
+            fi
+          done
+
       - name: Upload style logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -109,15 +118,6 @@ jobs:
           text = path.read_text()
           path.write_text("\n".join(line for line in text.splitlines() if "scheduler.finishSpill(" not in line) + "\n")
           PY_BASELINE
-
-      - name: Restore compiler cache
-        id: ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
       - name: Install tools and shallow dependencies
         run: |
@@ -196,6 +196,15 @@ jobs:
           PY
 
 
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+
       - name: Configure and build baseline
         run: |
           cmake -S . -B build -G Ninja \
@@ -228,24 +237,48 @@ jobs:
           assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork" in text, text
           PY_BASELINE_RESULT
 
+      - name: Require the earlier candidate to fail deferred-spill regression
+        run: |
+          git fetch --depth=1 origin f31ae977a6e33a3116981f64d001f7166de11d82 > build/fetch_previous_candidate.log 2>&1
+          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h; do
+            git show "f31ae977a6e33a3116981f64d001f7166de11d82:$path" > "$path"
+          done
+          git restore --source=HEAD -- src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          cmake --build build --target unit_test_space_shared_scheduler > build/build_previous_candidate.log 2>&1
+          set +e
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes \
+            > build/test_previous_candidate_pending.log 2>&1
+          previous_result=$?
+          set -e
+          test "$previous_result" = 1
+          python3 - <<'PY_PREVIOUS_RESULT'
+          from pathlib import Path
+          text = Path("build/test_previous_candidate_pending.log").read_text()
+          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
+          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes" in text, text
+          PY_PREVIOUS_RESULT
+
       - name: Build patched controller and scheduler tests
         id: patched
         run: |
           git restore --source=HEAD -- src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
           cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
 
-      - name: Compile the actual runtime execution call site
+      - name: Compile the actual executor and join call sites
         run: |
           ninja -C build -t targets all > build/ninja_targets.log
           python3 - <<'PY_TARGET'
           from pathlib import Path
           import subprocess
           targets = [line.split(":", 1)[0] for line in Path("build/ninja_targets.log").read_text().splitlines()]
-          targets = [target for target in targets if target.endswith("/ExecutionThreadContext.cpp.o") and "/Runtime/" in target]
-          if len(targets) != 1:
-              raise RuntimeError(f"Expected one runtime execution object, got {targets}")
-          with open("build/build_runtime_execution.log", "w") as log:
-              subprocess.run(["ninja", "-C", "build", targets[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
+          suffixes = ["/Runtime/ExecutionThreadContext.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
+          for suffix in suffixes:
+              matches = [target for target in targets if target.endswith(suffix)]
+              if len(matches) != 1:
+                  raise RuntimeError(f"Expected one object for {suffix}, got {matches}")
+              with open("build/build_runtime_" + Path(suffix).name + ".log", "w") as log:
+                  subprocess.run(["ninja", "-C", "build", matches[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
           PY_TARGET
 
       - name: Run all scheduler cases independently
@@ -265,8 +298,8 @@ jobs:
                   suite = line.strip()
               elif suite and line.startswith("  "):
                   tests.append(suite + line.strip().split()[0])
-          if len(tests) != 77:
-              raise RuntimeError(f"Expected 77 scheduler tests, found {len(tests)}")
+          if len(tests) != 78:
+              raise RuntimeError(f"Expected 78 scheduler tests, found {len(tests)}")
           failed = []
           results = []
           for name in tests:
@@ -286,6 +319,15 @@ jobs:
         run: |
           timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
             --gtest_filter=SchedulerSpaceShared.* > build/test_suite.log 2>&1
+
+      - name: Print build and test failure diagnostics
+        if: failure()
+        run: |
+          for log in build/configure.log build/build_*.log build/test_baseline_spill_work.log build/test_previous_candidate_pending.log build/test_suite.log build/test_results.tsv; do
+            if test -f "$log"; then
+              tail -n 100 "$log"
+            fi
+          done
 
       - name: Save compiler cache
         if: always()
