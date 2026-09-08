@@ -2,7 +2,7 @@ name: PR 113506 dedicated recovery preflight
 
 on:
   push:
-    branches: ['ci/pr113506-master-sync-52c-validation-20260908']
+    branches: ['ci/pr113506-master-sync-52c-validation-v2-20260908']
 
 permissions:
   contents: read
@@ -245,14 +245,14 @@ jobs:
               > "build/test_corrected_$test_name.log" 2>&1
           done
 
-      - name: Compile the actual executor and join call sites
+      - name: Compile exact workload-manager test and executor/join call sites
         run: |
           ninja -C build -t targets all > build/ninja_targets.log
           python3 - <<'PY_TARGET'
           from pathlib import Path
           import subprocess
           targets = [line.split(":", 1)[0] for line in Path("build/ninja_targets.log").read_text().splitlines()]
-          suffixes = ["/Runtime/ExecutionThreadContext.cpp.o", "/Runtime/ExecutingGraph.cpp.o", "/Runtime/PipelineExecutor.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
+          suffixes = ["/Common/Scheduler/Nodes/tests/gtest_workload_resource_manager.cpp.o", "/Runtime/ExecutionThreadContext.cpp.o", "/Runtime/ExecutingGraph.cpp.o", "/Runtime/PipelineExecutor.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
           for suffix in suffixes:
               matches = [target for target in targets if target.endswith(suffix)]
               if len(matches) != 1:
@@ -260,6 +260,46 @@ jobs:
               with open("build/build_runtime_" + Path(suffix).name + ".log", "w") as log:
                   subprocess.run(["ninja", "-C", "build", matches[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
           PY_TARGET
+
+      - name: Run all 90 scheduler cases independently
+        if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
+        run: |
+          python3 - <<'PY_INDIVIDUAL'
+          from pathlib import Path
+          import subprocess
+
+          binary = "build/src/unit_test_space_shared_scheduler"
+          listing = subprocess.run(
+              [binary, "--gtest_list_tests", "--gtest_filter=SchedulerSpaceShared.*"],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          Path("build/test_list.log").write_text(listing.stdout)
+          tests = []
+          suite = ""
+          for line in listing.stdout.splitlines():
+              if line.startswith("SchedulerSpaceShared."):
+                  suite = line.strip()
+              elif suite and line.startswith("  "):
+                  tests.append(suite + line.strip().split()[0])
+          if len(tests) != 90:
+              raise RuntimeError(f"Expected 90 scheduler tests, found {len(tests)}")
+          results = []
+          for name in tests:
+              log_path = Path("build") / f"test_individual_{name}.log"
+              with log_path.open("w") as log:
+                  result = subprocess.run(
+                      ["timeout", "--kill-after=5s", "30s", binary, f"--gtest_filter={name}"],
+                      stdout=log,
+                      stderr=subprocess.STDOUT,
+                  )
+              results.append(f"{name}\t{result.returncode}")
+              if result.returncode:
+                  Path("build/individual_results.txt").write_text("\n".join(results) + "\n")
+                  raise RuntimeError(f"{name} failed with exit {result.returncode}")
+          Path("build/individual_results.txt").write_text("\n".join(results) + "\n")
+          PY_INDIVIDUAL
 
       - name: Run complete 90-case scheduler suite together
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
