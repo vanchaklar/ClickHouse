@@ -705,6 +705,15 @@ struct ManualAllocation : public ResourceAllocation
         return synced;
     }
 
+    bool waitRemovedFor(std::chrono::milliseconds timeout)
+    {
+        std::unique_lock lock(mutex);
+        const bool was_removed = cv.wait_for(lock, timeout, [this] { return removed || fail_reason; });
+        if (fail_reason)
+            std::rethrow_exception(fail_reason);
+        return was_removed;
+    }
+
     size_t killCount()
     {
         std::unique_lock lock(mutex);
@@ -2874,11 +2883,18 @@ TEST(SchedulerSpaceShared, RemovingParkedOwnerRetriesHiddenSameQueueRequest)
     release.set_value();
 
     ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
-    std::promise<bool> parked;
-    auto parked_future = parked.get_future();
-    t.scheduler.event_queue.enqueue([&] { parked.set_value(blocked->isIncreaseSuspended()); });
-    ASSERT_TRUE(parked_future.get()) << "The competing request did not join the suspension round";
-
+    std::promise<bool> removal_queued_while_parked;
+    auto removal_queued_future = removal_queued_while_parked.get_future();
+    t.scheduler.event_queue.enqueue([&]
+    {
+        const bool parked = blocked->isIncreaseSuspended();
+        if (parked)
+            queue->removeAllocation(*heavy);
+        removal_queued_while_parked.set_value(parked);
+    });
+    ASSERT_TRUE(removal_queued_future.get()) << "The competing request did not join the suspension round";
+    ASSERT_TRUE(heavy->waitRemovedFor(std::chrono::seconds(5)))
+        << "The parked owner was not removed";
     heavy.reset();
 
     ASSERT_TRUE(blocked->waitSyncedFor(std::chrono::seconds(5)))
