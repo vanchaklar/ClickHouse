@@ -542,10 +542,12 @@ void AllocationQueue::approveDecrease()
             break;
         }
     }
-    bool retry_suspended_growth = suspended_growth != nullptr && !ancestor_has_suction;
+    bool retry_suspended_growth
+        = (suspended_growth != nullptr || memory_growth_suspension_retry_requested) && !ancestor_has_suction;
     if (retry_suspended_growth)
     {
-        suspended_growth->memory_growth_suspended = false;
+        if (suspended_growth)
+            suspended_growth->memory_growth_suspended = false;
         /// Capacity changed, so every alternative rejected in the previous round deserves a fresh
         /// fit check as well. This preserves queue order without letting one oversized request hide
         /// a later fitting request permanently.
@@ -558,6 +560,7 @@ void AllocationQueue::approveDecrease()
         {
             increasing.memory_growth_suspended = false;
         }
+        memory_growth_suspension_retry_requested = false;
         memory_growth_suspension_changed = true;
     }
 
@@ -725,7 +728,13 @@ void AllocationQueue::processActivation()
             ResourceAllocation & allocation = removing_allocations.front();
             removing_allocations.pop_front(); // Unlink before calling allocationFailed() to avoid use-after-free race
             if (&allocation == suspended_growth)
+            {
                 clearMemoryGrowthSuspension();
+                /// The owner's later decrease releases capacity, but it is no longer available as
+                /// `suspended_growth` to trigger the normal retry path in `approveDecrease`.
+                /// Remember that the same suspension round still has hidden requests to reopen.
+                memory_growth_suspension_retry_requested = true;
+            }
             else
                 allocation.memory_growth_eviction_order = 0;
             if (allocation.pending_hook.is_linked()) // Allocation is still pending - cancel it
