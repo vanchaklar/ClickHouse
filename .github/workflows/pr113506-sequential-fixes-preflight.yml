@@ -1,4 +1,4 @@
-name: PR 113506 sequential scheduler fixes preflight
+name: PR 113506 force-spill eligibility preflight
 
 on:
   push:
@@ -96,28 +96,20 @@ jobs:
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
-      BASE_SHA: acd51d6d1bad1f48fdc74ecafa858ef24c6e8236
+      BASE_SHA: 72eb89c66b22fa06fb611b55498f8a39981d15e9
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Prepare exact production baseline with the new regression
+      - name: Prepare baseline with the new regression
         run: |
           mkdir -p build
           git fetch --depth=1 origin "$BASE_SHA" > build/fetch.log 2>&1
-          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/SpaceShared/FairAllocation.cpp src/Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.cpp; do
+          for path in src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/Nodes/SpaceShared/AllocationLimit.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp; do
             git show "$BASE_SHA:$path" > "$path"
           done
-          python3 - <<'PY_BASELINE'
-          from pathlib import Path
-          path = Path("src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp")
-          # The old controller has no completion hook. The baseline probe asserts Pending before
-          # any hook is used; omit hook calls only to compile the new tests against the old API.
-          text = path.read_text()
-          path.write_text("\n".join(line for line in text.splitlines() if "scheduler.finishSpill(" not in line) + "\n")
-          PY_BASELINE
 
       - name: Install tools and shallow dependencies
         run: |
@@ -220,50 +212,34 @@ jobs:
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
           cmake --build build --target unit_test_space_shared_scheduler > build/build_baseline.log 2>&1
 
-      - name: Require the exact baseline to fail the new regression
+      - name: Require the baseline to fail force-spill without protection
         run: |
           set +e
           timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork \
-            > build/test_baseline_spill_work.log 2>&1
+            --gtest_filter=SchedulerSpaceShared.ForceSpillWithoutEvictionProtection \
+            > build/test_baseline_force_only.log 2>&1
           baseline_result=$?
           set -e
-          printf 'spill_work_exit=%s\n' "$baseline_result" > build/baseline_results.txt
+          printf 'force_only_exit=%s\n' "$baseline_result" > build/baseline_results.txt
           test "$baseline_result" = 1
           python3 - <<'PY_BASELINE_RESULT'
           from pathlib import Path
-          text = Path("build/test_baseline_spill_work.log").read_text()
-          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
-          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork" in text, text
+          text = Path("build/test_baseline_force_only.log").read_text()
+          assert "processor.spillCallCount()" in text, text
+          assert "[  FAILED  ] SchedulerSpaceShared.ForceSpillWithoutEvictionProtection" in text, text
           PY_BASELINE_RESULT
 
-      - name: Require the earlier candidate to fail deferred-spill regression
-        run: |
-          git fetch --depth=1 origin f31ae977a6e33a3116981f64d001f7166de11d82 > build/fetch_previous_candidate.log 2>&1
-          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h; do
-            git show "f31ae977a6e33a3116981f64d001f7166de11d82:$path" > "$path"
-          done
-          git restore --source=HEAD -- src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
-          cmake --build build --target unit_test_space_shared_scheduler > build/build_previous_candidate.log 2>&1
-          set +e
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes \
-            > build/test_previous_candidate_pending.log 2>&1
-          previous_result=$?
-          set -e
-          test "$previous_result" = 1
-          python3 - <<'PY_PREVIOUS_RESULT'
-          from pathlib import Path
-          text = Path("build/test_previous_candidate_pending.log").read_text()
-          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
-          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes" in text, text
-          PY_PREVIOUS_RESULT
-
-      - name: Build patched controller and scheduler tests
+      - name: Build corrected eligibility
         id: patched
         run: |
-          git restore --source=HEAD -- src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          git restore --source=HEAD -- src/Common/Scheduler/ResourceAllocation.h src/Common/Scheduler/MemoryReservation.h src/Common/Scheduler/Nodes/SpaceShared/AllocationLimit.cpp src/Common/Scheduler/Nodes/SpaceShared/AllocationQueue.cpp
           cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
+
+      - name: Run corrected force-spill regression
+        run: |
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.ForceSpillWithoutEvictionProtection \
+            > build/test_corrected_force_only.log 2>&1
 
       - name: Compile the actual executor and join call sites
         run: |
@@ -281,74 +257,7 @@ jobs:
                   subprocess.run(["ninja", "-C", "build", matches[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
           PY_TARGET
 
-      - name: Verify the first fix against the original 78 scheduler cases
-        run: |
-          python3 - <<'PY'
-          import pathlib
-          import subprocess
-          import sys
-          binary = "build/src/unit_test_space_shared_scheduler"
-          listing = subprocess.run([binary, "--gtest_list_tests", "--gtest_filter=SchedulerSpaceShared.*"],
-                                   check=True, capture_output=True, text=True)
-          pathlib.Path("build/test_list.log").write_text(listing.stdout)
-          tests = []
-          suite = ""
-          for line in listing.stdout.splitlines():
-              if line.startswith("SchedulerSpaceShared."):
-                  suite = line.strip()
-              elif suite and line.startswith("  "):
-                  tests.append(suite + line.strip().split()[0])
-          sibling_tests = {"SchedulerSpaceShared.FairProtectionSearchesAllEligibleSiblings", "SchedulerSpaceShared.PrecedenceProtectionSearchesAllEligibleSiblings"}
-          tests = [name for name in tests if name not in sibling_tests]
-          if len(tests) != 78:
-              raise RuntimeError(f"Expected 78 scheduler tests, found {len(tests)}")
-          failed = []
-          results = []
-          for name in tests:
-              with open(f"build/test_{name}.log", "w") as log:
-                  result = subprocess.run(["timeout", "--kill-after=5s", "30s", binary,
-                                           f"--gtest_filter={name}"], stdout=log, stderr=subprocess.STDOUT)
-              results.append(f"{name}\t{result.returncode}")
-              if result.returncode:
-                  failed.append(name)
-          pathlib.Path("build/test_results.tsv").write_text("\n".join(results) + "\n")
-          print(f"Executed {len(tests)} tests; {len(failed)} failed")
-          sys.exit(bool(failed))
-          PY
-
-      - name: Require original policies to fail both sibling regressions
-        run: |
-          for policy in Fair Precedence; do
-            set +e
-            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-              "--gtest_filter=SchedulerSpaceShared.${policy}ProtectionSearchesAllEligibleSiblings" \
-              > "build/test_original_${policy}_siblings.log" 2>&1
-            policy_result=$?
-            set -e
-            test "$policy_result" = 1
-          done
-          python3 - <<'PY_POLICY_BASELINE'
-          from pathlib import Path
-          for policy in ["Fair", "Precedence"]:
-              text = Path(f"build/test_original_{policy}_siblings.log").read_text()
-              assert "[  FAILED  ] SchedulerSpaceShared." + policy + "ProtectionSearchesAllEligibleSiblings" in text, text
-              assert "select_victim(second, IncreaseRequest::Kind::Regular)" in text, text
-          PY_POLICY_BASELINE
-
-      - name: Build corrected sibling policies
-        run: |
-          git restore --source=HEAD -- src/Common/Scheduler/Nodes/SpaceShared/FairAllocation.cpp src/Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.cpp
-          cmake --build build --target unit_test_space_shared_scheduler > build/build_sibling_policies.log 2>&1
-
-      - name: Run corrected sibling regressions independently
-        run: |
-          for policy in Fair Precedence; do
-            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-              "--gtest_filter=SchedulerSpaceShared.${policy}ProtectionSearchesAllEligibleSiblings" \
-              > "build/test_corrected_${policy}_siblings.log" 2>&1
-          done
-
-      - name: Run complete 80-case scheduler suite together
+      - name: Run complete 81-case scheduler suite together
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
         run: |
           timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
@@ -356,13 +265,13 @@ jobs:
           python3 - <<'PY_SUITE_COUNT'
           from pathlib import Path
           text = Path("build/test_suite.log").read_text()
-          assert "[  PASSED  ] 80 tests." in text, text
+          assert "[  PASSED  ] 81 tests." in text, text
           PY_SUITE_COUNT
 
       - name: Print build and test failure diagnostics
         if: failure()
         run: |
-          for log in build/configure.log build/build_*.log build/test_baseline_spill_work.log build/test_previous_candidate_pending.log build/test_*_siblings.log build/test_suite.log build/test_results.tsv; do
+          for log in build/configure.log build/build_*.log build/test_baseline_force_only.log build/test_corrected_force_only.log build/test_suite.log build/test_results.tsv; do
             if test -f "$log"; then
               tail -n 100 "$log"
             fi
