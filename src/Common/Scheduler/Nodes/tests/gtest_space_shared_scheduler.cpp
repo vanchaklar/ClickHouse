@@ -2862,11 +2862,23 @@ TEST(SchedulerSpaceShared, RemovingParkedOwnerRetriesHiddenSameQueueRequest)
     auto heavy = std::make_unique<ManualAllocation>(
         queue, "heavy", 8000, true, protectedFromEvictionPolicy(1));
     heavy->protectAfterPressureRounds(1);
+
+    std::promise<void> entered;
+    std::promise<void> release;
+    t.scheduler.event_queue.enqueue([&] { entered.set_value(); release.get_future().get(); });
+    entered.get_future().get();
+
     heavy->increaseAsync(5000);
     auto blocked = std::make_unique<ManualAllocation>(
         queue, "blocked", 3000, /* wait_for_admission = */ false);
+    release.set_value();
 
     ASSERT_TRUE(heavy->waitPressureCountFor(1, std::chrono::seconds(5)));
+    std::promise<bool> parked;
+    auto parked_future = parked.get_future();
+    t.scheduler.event_queue.enqueue([&] { parked.set_value(blocked->isIncreaseSuspended()); });
+    ASSERT_TRUE(parked_future.get()) << "The competing request did not join the suspension round";
+
     heavy.reset();
 
     ASSERT_TRUE(blocked->waitSyncedFor(std::chrono::seconds(5)))
