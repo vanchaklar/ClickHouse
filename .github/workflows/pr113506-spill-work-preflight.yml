@@ -1,0 +1,306 @@
+name: PR 113506 spill-work completion preflight
+
+on:
+  push:
+    branches: ['ci/pr113506-spill-work-validation-20260908']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr113506-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  style:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STYLE_BASE_SHA: 55c2563639c7ab7d90aa85f52351ec35c936bae7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install style dependencies
+        run: |
+          sudo apt-get update > style-setup.log 2>&1
+          sudo apt-get install -y libxml2-utils ripgrep >> style-setup.log 2>&1
+          python3 -m pip install -r ci/docker/style-test/requirements.txt >> style-setup.log 2>&1
+
+      - name: Run repository style check
+        run: |
+          mkdir -p ci/tmp
+          git fetch --depth=1 origin "$STYLE_BASE_SHA" > style-fetch.log 2>&1
+          PYTHONPATH=./ci:. python3 ./ci/jobs/scripts/workflow_hooks/store_data.py > store-data.log 2>&1
+          PYTHONPATH=./ci:. python3 - <<'PY' > style.log 2>&1
+          import os
+          import runpy
+          import subprocess
+          from pathlib import Path
+
+          from ci.jobs.scripts.workflow_hooks.store_data import SETTINGS_HISTORY_FILE
+          from ci.jobs.scripts.workflow_hooks.store_data import parse_settings_history_changes
+          from ci.praktika.info import Info
+
+          base = os.environ["STYLE_BASE_SHA"]
+          changed_files = subprocess.run(
+              ["git", "diff", "--name-only", base, "HEAD"],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout.splitlines()
+          patch = subprocess.run(
+              ["git", "diff", "--unified=0", base, "HEAD", "--", SETTINGS_HISTORY_FILE],
+              check=True,
+              capture_output=True,
+              text=True,
+          ).stdout
+          file_lines = Path(SETTINGS_HISTORY_FILE).read_text().splitlines()
+
+          info = Info()
+          info.store_kv_data("changed_files", changed_files)
+          info.store_kv_data(
+              "settings_history_changed_settings",
+              parse_settings_history_changes(patch, file_lines),
+          )
+          runpy.run_path("ci/jobs/check_style.py", run_name="__main__")
+          PY
+
+      - name: Upload style logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-style
+          path: |
+            style-setup.log
+            style-fetch.log
+            store-data.log
+            style.log
+          retention-days: 7
+
+  scheduler:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
+      CCACHE_MAXSIZE: 2G
+      BASE_SHA: acd51d6d1bad1f48fdc74ecafa858ef24c6e8236
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare exact production baseline with the new regression
+        run: |
+          mkdir -p build
+          git fetch --depth=1 origin "$BASE_SHA" > build/fetch.log 2>&1
+          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h; do
+            git show "$BASE_SHA:$path" > "$path"
+          done
+          python3 - <<'PY_BASELINE'
+          from pathlib import Path
+          path = Path("src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp")
+          # The old controller has no completion hook. The baseline probe asserts Pending before
+          # any hook is used; omit hook calls only to compile the new tests against the old API.
+          text = path.read_text()
+          path.write_text("\n".join(line for line in text.splitlines() if "scheduler.finishSpill(" not in line) + "\n")
+          PY_BASELINE
+
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+
+      - name: Install tools and shallow dependencies
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          sudo apt-get update > build/setup.log 2>&1
+          sudo apt-get install -y ca-certificates ccache gnupg nasm ninja-build wget >> build/setup.log 2>&1
+          wget -q https://apt.llvm.org/llvm-snapshot.gpg.key -O build/llvm-key.asc
+          sudo cp build/llvm-key.asc /etc/apt/trusted.gpg.d/llvm.asc
+          echo "deb https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm21.list
+          sudo apt-get update >> build/setup.log 2>&1
+          sudo apt-get install -y clang-21 lld-21 >> build/setup.log 2>&1
+          git submodule sync --recursive > build/submodules.log 2>&1
+          git submodule update --init --recursive --depth 1 --jobs 8 >> build/submodules.log 2>&1
+
+      - name: Add focused target
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/CMakeLists.txt")
+          path.write_text(path.read_text() + r"""
+          if (ENABLE_TESTS)
+              file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
+          #include <gtest/gtest.h>
+          #include <Columns/IColumn_fwd.h>
+          #include <Common/ThreadStatus.h>
+          #include <Processors/IProcessor.h>
+          #include <Poco/ConsoleChannel.h>
+          #include <Poco/Logger.h>
+
+          namespace DB
+          {
+          void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
+
+          /// The focused runner deliberately does not link the complete processor library.
+          /// These definitions are sufficient for the port-free spill probe used by the scheduler tests.
+          IProcessor::IProcessor() = default;
+          IProcessor::Status IProcessor::prepare() { return Status::Finished; }
+          void IProcessor::work() {}
+          int IProcessor::schedule() { return -1; }
+          #if defined(OS_LINUX) || defined(OS_DARWIN)
+          std::tuple<int, uint32_t, Int64> IProcessor::scheduleForEvent() { return {-1, 0, -1}; }
+          #endif
+          IProcessor::PipelineUpdate IProcessor::updatePipeline() { return {}; }
+          void IProcessor::cancel(CancelReason) noexcept {}
+
+          void intrusive_ptr_add_ref(const IColumn *) {}
+          void intrusive_ptr_release(const IColumn *) {}
+          }
+
+          int main(int argc, char ** argv)
+          {
+              /// Surface assertion descriptions and traces from re-executed death-test children.
+              Poco::Logger::root().setChannel(new Poco::ConsoleChannel);
+              testing::InitGoogleTest(&argc, argv);
+              return RUN_ALL_TESTS();
+          }
+          ]=])
+
+              clickhouse_add_executable(
+                  unit_test_space_shared_scheduler
+                  Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+                  Core/Settings.cpp
+                  "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
+              )
+              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
+              target_link_libraries(
+                  unit_test_space_shared_scheduler PRIVATE
+                  ch_contrib::gmock_all
+                  ch_contrib::gtest
+                  clickhouse_common_io
+                  clickhouse_common_config
+              )
+          endif()
+          """)
+          PY
+
+
+      - name: Configure and build baseline
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_LINKER=ld.lld-21 \
+            -DPARALLEL_COMPILE_JOBS=2 -DPARALLEL_LINK_JOBS=1 \
+            -DENABLE_TESTS=ON -DENABLE_EXAMPLES=OFF -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_UTILS=OFF -DENABLE_JEMALLOC=OFF -DENABLE_AWS_S3=OFF \
+            -DENABLE_AZURE_BLOB_STORAGE=OFF -DENABLE_HDFS=OFF -DENABLE_KAFKA=OFF \
+            -DENABLE_NATS=OFF -DENABLE_RABBITMQ=OFF -DENABLE_GRPC=OFF \
+            -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
+          cmake --build build --target unit_test_space_shared_scheduler > build/build_baseline.log 2>&1
+
+      - name: Require the exact baseline to fail the new regression
+        run: |
+          set +e
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork \
+            > build/test_baseline_spill_work.log 2>&1
+          baseline_result=$?
+          set -e
+          printf 'spill_work_exit=%s\n' "$baseline_result" > build/baseline_results.txt
+          test "$baseline_result" = 1
+          python3 - <<'PY_BASELINE_RESULT'
+          from pathlib import Path
+          text = Path("build/test_baseline_spill_work.log").read_text()
+          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
+          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork" in text, text
+          PY_BASELINE_RESULT
+
+      - name: Build patched controller and scheduler tests
+        id: patched
+        run: |
+          git restore --source=HEAD -- src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
+
+      - name: Compile the actual runtime execution call site
+        run: |
+          ninja -C build -t targets all > build/ninja_targets.log
+          python3 - <<'PY_TARGET'
+          from pathlib import Path
+          import subprocess
+          targets = [line.split(":", 1)[0] for line in Path("build/ninja_targets.log").read_text().splitlines()]
+          targets = [target for target in targets if target.endswith("/ExecutionThreadContext.cpp.o") and "/Runtime/" in target]
+          if len(targets) != 1:
+              raise RuntimeError(f"Expected one runtime execution object, got {targets}")
+          with open("build/build_runtime_execution.log", "w") as log:
+              subprocess.run(["ninja", "-C", "build", targets[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
+          PY_TARGET
+
+      - name: Run all scheduler cases independently
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+          binary = "build/src/unit_test_space_shared_scheduler"
+          listing = subprocess.run([binary, "--gtest_list_tests", "--gtest_filter=SchedulerSpaceShared.*"],
+                                   check=True, capture_output=True, text=True)
+          pathlib.Path("build/test_list.log").write_text(listing.stdout)
+          tests = []
+          suite = ""
+          for line in listing.stdout.splitlines():
+              if line.startswith("SchedulerSpaceShared."):
+                  suite = line.strip()
+              elif suite and line.startswith("  "):
+                  tests.append(suite + line.strip().split()[0])
+          if len(tests) != 77:
+              raise RuntimeError(f"Expected 77 scheduler tests, found {len(tests)}")
+          failed = []
+          results = []
+          for name in tests:
+              with open(f"build/test_{name}.log", "w") as log:
+                  result = subprocess.run(["timeout", "--kill-after=5s", "30s", binary,
+                                           f"--gtest_filter={name}"], stdout=log, stderr=subprocess.STDOUT)
+              results.append(f"{name}\t{result.returncode}")
+              if result.returncode:
+                  failed.append(name)
+          pathlib.Path("build/test_results.tsv").write_text("\n".join(results) + "\n")
+          print(f"Executed {len(tests)} tests; {len(failed)} failed")
+          sys.exit(bool(failed))
+          PY
+
+      - name: Run scheduler suite together
+        if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
+        run: |
+          timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.* > build/test_suite.log 2>&1
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      - name: Upload build and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr113506-spill-work-preflight
+          path: |
+            build/*.log
+            build/*results.*
+          retention-days: 7
+
