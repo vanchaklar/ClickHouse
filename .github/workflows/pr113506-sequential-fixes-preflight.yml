@@ -1,4 +1,4 @@
-name: PR 113506 master-sync preflight
+name: PR 113506 sequential scheduler fixes preflight
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pr113506-recovery-${{ github.ref }}
+  group: pr113506-recovery-refs/heads/ci/pr113506-spill-work-validation-20260908
   cancel-in-progress: true
 
 jobs:
@@ -69,6 +69,15 @@ jobs:
           runpy.run_path("ci/jobs/check_style.py", run_name="__main__")
           PY
 
+      - name: Print style failure diagnostics
+        if: failure()
+        run: |
+          for log in style-fetch.log store-data.log style.log; do
+            if test -f "$log"; then
+              tail -n 180 "$log"
+            fi
+          done
+
       - name: Upload style logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -87,28 +96,28 @@ jobs:
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
-      BASE_SHA: d3725cea24aa0f40908cefa07035b7822726bec6
+      BASE_SHA: acd51d6d1bad1f48fdc74ecafa858ef24c6e8236
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Prepare logs and preserve patched tests
+      - name: Prepare exact production baseline with the new regression
         run: |
           mkdir -p build
-          cp src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp build/scheduler_tests_patched.cpp
           git fetch --depth=1 origin "$BASE_SHA" > build/fetch.log 2>&1
-          git show "$BASE_SHA:src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp" > src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
-
-      - name: Restore compiler cache
-        id: ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/SpaceShared/FairAllocation.cpp src/Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.cpp; do
+            git show "$BASE_SHA:$path" > "$path"
+          done
+          python3 - <<'PY_BASELINE'
+          from pathlib import Path
+          path = Path("src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp")
+          # The old controller has no completion hook. The baseline probe asserts Pending before
+          # any hook is used; omit hook calls only to compile the new tests against the old API.
+          text = path.read_text()
+          path.write_text("\n".join(line for line in text.splitlines() if "scheduler.finishSpill(" not in line) + "\n")
+          PY_BASELINE
 
       - name: Install tools and shallow dependencies
         run: |
@@ -187,6 +196,15 @@ jobs:
           PY
 
 
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
+
       - name: Configure and build baseline
         run: |
           cmake -S . -B build -G Ninja \
@@ -202,44 +220,68 @@ jobs:
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
           cmake --build build --target unit_test_space_shared_scheduler > build/build_baseline.log 2>&1
 
-      - name: Compile patched workload-manager regression
-        run: |
-          ninja -C build -t targets all > build/ninja_targets.log
-          sed -n 's/:.*//p' build/ninja_targets.log             | grep -m1 'unit_tests_dbms.dir/Common/Scheduler/Nodes/tests/gtest_workload_resource_manager.cpp.o'             > build/workload_object.txt
-          test -s build/workload_object.txt
-          xargs ninja -C build < build/workload_object.txt > build/build_workload_regression.log 2>&1
-
-      - name: Reproduce baseline failures with bounded processes
+      - name: Require the exact baseline to fail the new regression
         run: |
           set +e
           timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.UnprotectedGrowthDoesNotJoinProtectedRecoveryEpisode \
-            --gtest_repeat=5 > build/test_baseline_pressure.log 2>&1
-          pressure_result=$?
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.Smoke:SchedulerSpaceShared.DetachingLimitCancelsQueuedSuction \
-            > build/test_baseline_detach.log 2>&1
-          detach_result=$?
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_filter=SchedulerSpaceShared.EvictionProtectionIsLastFallback \
-            > build/test_baseline_eviction_order.log 2>&1
-          eviction_result=$?
-          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
-            --gtest_death_test_style=threadsafe \
-            --gtest_filter=SchedulerSpaceShared.SiblingLimitsSharePolicySuctionSlot \
-            > build/test_baseline_sibling_precedence.log 2>&1
-          sibling_result=$?
+            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork \
+            > build/test_baseline_spill_work.log 2>&1
+          baseline_result=$?
           set -e
-          printf 'pressure_exit=%s\ndetach_exit=%s\neviction_exit=%s\nsibling_exit=%s\n' \
-            "$pressure_result" "$detach_result" "$eviction_result" "$sibling_result" > build/baseline_results.txt
+          printf 'spill_work_exit=%s\n' "$baseline_result" > build/baseline_results.txt
+          test "$baseline_result" = 1
+          python3 - <<'PY_BASELINE_RESULT'
+          from pathlib import Path
+          text = Path("build/test_baseline_spill_work.log").read_text()
+          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
+          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsForProcessorWork" in text, text
+          PY_BASELINE_RESULT
 
-      - name: Build patched tests
+      - name: Require the earlier candidate to fail deferred-spill regression
+        run: |
+          git fetch --depth=1 origin f31ae977a6e33a3116981f64d001f7166de11d82 > build/fetch_previous_candidate.log 2>&1
+          for path in src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h; do
+            git show "f31ae977a6e33a3116981f64d001f7166de11d82:$path" > "$path"
+          done
+          git restore --source=HEAD -- src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          cmake --build build --target unit_test_space_shared_scheduler > build/build_previous_candidate.log 2>&1
+          set +e
+          timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+            --gtest_filter=SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes \
+            > build/test_previous_candidate_pending.log 2>&1
+          previous_result=$?
+          set -e
+          test "$previous_result" = 1
+          python3 - <<'PY_PREVIOUS_RESULT'
+          from pathlib import Path
+          text = Path("build/test_previous_candidate_pending.log").read_text()
+          assert "MemorySpillScheduler::ForcedSpillOutcome::Pending" in text, text
+          assert "[  FAILED  ] SchedulerSpaceShared.ForcedSpillWaitsUntilDeferredSpillFinishes" in text, text
+          PY_PREVIOUS_RESULT
+
+      - name: Build patched controller and scheduler tests
         id: patched
         run: |
-          cp build/scheduler_tests_patched.cpp src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+          git restore --source=HEAD -- src/Common/MemorySpillScheduler.cpp src/Common/MemorySpillScheduler.h src/Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
           cmake --build build --target unit_test_space_shared_scheduler > build/build_patched.log 2>&1
 
-      - name: Run all scheduler cases independently
+      - name: Compile the actual executor and join call sites
+        run: |
+          ninja -C build -t targets all > build/ninja_targets.log
+          python3 - <<'PY_TARGET'
+          from pathlib import Path
+          import subprocess
+          targets = [line.split(":", 1)[0] for line in Path("build/ninja_targets.log").read_text().splitlines()]
+          suffixes = ["/Runtime/ExecutionThreadContext.cpp.o", "/Runtime/ExecutingGraph.cpp.o", "/Transforms/JoiningTransform.cpp.o", "/Interpreters/GraceHashJoin.cpp.o"]
+          for suffix in suffixes:
+              matches = [target for target in targets if target.endswith(suffix)]
+              if len(matches) != 1:
+                  raise RuntimeError(f"Expected one object for {suffix}, got {matches}")
+              with open("build/build_runtime_" + Path(suffix).name + ".log", "w") as log:
+                  subprocess.run(["ninja", "-C", "build", matches[0]], check=True, stdout=log, stderr=subprocess.STDOUT)
+          PY_TARGET
+
+      - name: Verify the first fix against the original 78 scheduler cases
         run: |
           python3 - <<'PY'
           import pathlib
@@ -256,8 +298,10 @@ jobs:
                   suite = line.strip()
               elif suite and line.startswith("  "):
                   tests.append(suite + line.strip().split()[0])
-          if len(tests) != 73:
-              raise RuntimeError(f"Expected 73 scheduler tests, found {len(tests)}")
+          sibling_tests = {"SchedulerSpaceShared.FairProtectionSearchesAllEligibleSiblings", "SchedulerSpaceShared.PrecedenceProtectionSearchesAllEligibleSiblings"}
+          tests = [name for name in tests if name not in sibling_tests]
+          if len(tests) != 78:
+              raise RuntimeError(f"Expected 78 scheduler tests, found {len(tests)}")
           failed = []
           results = []
           for name in tests:
@@ -272,11 +316,57 @@ jobs:
           sys.exit(bool(failed))
           PY
 
-      - name: Run scheduler suite together
+      - name: Require original policies to fail both sibling regressions
+        run: |
+          for policy in Fair Precedence; do
+            set +e
+            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+              "--gtest_filter=SchedulerSpaceShared.${policy}ProtectionSearchesAllEligibleSiblings" \
+              > "build/test_original_${policy}_siblings.log" 2>&1
+            policy_result=$?
+            set -e
+            test "$policy_result" = 1
+          done
+          python3 - <<'PY_POLICY_BASELINE'
+          from pathlib import Path
+          for policy in ["Fair", "Precedence"]:
+              text = Path(f"build/test_original_{policy}_siblings.log").read_text()
+              assert "[  FAILED  ] SchedulerSpaceShared." + policy + "ProtectionSearchesAllEligibleSiblings" in text, text
+              assert "select_victim(second, IncreaseRequest::Kind::Regular)" in text, text
+          PY_POLICY_BASELINE
+
+      - name: Build corrected sibling policies
+        run: |
+          git restore --source=HEAD -- src/Common/Scheduler/Nodes/SpaceShared/FairAllocation.cpp src/Common/Scheduler/Nodes/SpaceShared/PrecedenceAllocation.cpp
+          cmake --build build --target unit_test_space_shared_scheduler > build/build_sibling_policies.log 2>&1
+
+      - name: Run corrected sibling regressions independently
+        run: |
+          for policy in Fair Precedence; do
+            timeout --kill-after=5s 30s build/src/unit_test_space_shared_scheduler \
+              "--gtest_filter=SchedulerSpaceShared.${policy}ProtectionSearchesAllEligibleSiblings" \
+              > "build/test_corrected_${policy}_siblings.log" 2>&1
+          done
+
+      - name: Run complete 80-case scheduler suite together
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
         run: |
           timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
             --gtest_filter=SchedulerSpaceShared.* > build/test_suite.log 2>&1
+          python3 - <<'PY_SUITE_COUNT'
+          from pathlib import Path
+          text = Path("build/test_suite.log").read_text()
+          assert "[  PASSED  ] 80 tests." in text, text
+          PY_SUITE_COUNT
+
+      - name: Print build and test failure diagnostics
+        if: failure()
+        run: |
+          for log in build/configure.log build/build_*.log build/test_baseline_spill_work.log build/test_previous_candidate_pending.log build/test_*_siblings.log build/test_suite.log build/test_results.tsv; do
+            if test -f "$log"; then
+              tail -n 100 "$log"
+            fi
+          done
 
       - name: Save compiler cache
         if: always()
@@ -289,7 +379,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-recovery-preflight
+          name: pr113506-spill-work-preflight
           path: |
             build/*.log
             build/*results.*
