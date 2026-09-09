@@ -240,7 +240,6 @@ jobs:
           done
 
       - name: Run all 92 scheduler cases independently
-      - name: Run all 91 scheduler cases independently
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
         run: |
           python3 - <<'PY_INDIVIDUAL'
