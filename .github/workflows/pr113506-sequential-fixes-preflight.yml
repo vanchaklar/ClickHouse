@@ -237,7 +237,6 @@ jobs:
             > build/test_corrected_DetachingPolicySuctionOwnerRetriesSibling.log 2>&1
 
       - name: Run all 91 scheduler cases independently
-      - name: Run all 90 scheduler cases independently
         if: ${{ !cancelled() && steps.patched.outcome == 'success' }}
         run: |
           python3 - <<'PY_INDIVIDUAL'
