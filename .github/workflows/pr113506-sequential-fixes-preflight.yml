@@ -1,14 +1,14 @@
-name: PR 113506 combined preflight v9
+name: PR 113506 combined preflight v10
 
 on:
   push:
-    branches: ['ci/pr113506-combined-validation-v9-20260913']
+    branches: ['ci/pr113506-combined-validation-v10-20260913']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr113506-combined-v9-${{ github.ref }}
+  group: pr113506-combined-v10-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -117,78 +117,6 @@ jobs:
           git submodule sync --recursive > build/submodules.log 2>&1
           git submodule update --init --recursive --depth 1 --jobs 8 >> build/submodules.log 2>&1
 
-      - name: Add focused target
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/CMakeLists.txt")
-          path.write_text(path.read_text() + r"""
-          if (ENABLE_TESTS)
-              file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp" [=[
-          #include <gtest/gtest.h>
-          #include <Columns/IColumn_fwd.h>
-          #include <Common/ThreadStatus.h>
-          #include <Processors/IProcessor.h>
-          #include <Poco/ConsoleChannel.h>
-          #include <Poco/Logger.h>
-
-          namespace DB
-          {
-          void ThreadStatus::initGlobalProfiler(UInt64, UInt64) {}
-
-          /// The focused runner deliberately does not link the complete processor library.
-          /// These definitions are sufficient for the port-free spill probe used by the scheduler tests.
-          IProcessor::IProcessor() = default;
-          IProcessor::Status IProcessor::prepare() { return Status::Finished; }
-          void IProcessor::work() {}
-          int IProcessor::schedule() { return -1; }
-          #if defined(OS_LINUX) || defined(OS_DARWIN)
-          std::tuple<int, uint32_t, Int64> IProcessor::scheduleForEvent() { return {-1, 0, -1}; }
-          #endif
-          IProcessor::PipelineUpdate IProcessor::updatePipeline() { return {}; }
-          void IProcessor::cancel(CancelReason) noexcept {}
-
-          void intrusive_ptr_add_ref(const IColumn *) {}
-          void intrusive_ptr_release(const IColumn *) {}
-          }
-
-          int main(int argc, char ** argv)
-          {
-              /// Surface assertion descriptions and traces from re-executed death-test children.
-              Poco::Logger::root().setChannel(new Poco::ConsoleChannel);
-              testing::InitGoogleTest(&argc, argv);
-              return RUN_ALL_TESTS();
-          }
-          ]=])
-
-              clickhouse_add_executable(
-                  unit_test_space_shared_scheduler
-                  Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
-                  Core/BaseSettings.cpp
-                  Core/Field.cpp
-                  Core/SettingsEnums.cpp
-                  Core/SettingsFields.cpp
-                  Core/Settings.cpp
-                  Core/ServerSettings.cpp
-                  Interpreters/MemoryReservationSettings.cpp
-                  "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
-              )
-              target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
-              target_link_options(unit_test_space_shared_scheduler PRIVATE -Wl,--error-limit=0)
-              target_link_libraries(
-                  unit_test_space_shared_scheduler PRIVATE
-                  ch_contrib::gmock_all
-                  ch_contrib::gtest
-                  clickhouse_common_io
-                  clickhouse_common_config
-                  ch_contrib::roaring
-              )
-          endif()
-          """)
-          PY
-
-
       - name: Restore compiler cache
         id: ccache
         uses: actions/cache/restore@v4
@@ -212,7 +140,7 @@ jobs:
             -DENABLE_NATS=OFF -DENABLE_RABBITMQ=OFF -DENABLE_GRPC=OFF \
             -DENABLE_PARQUET=OFF \
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
-          cmake --build build --target unit_test_space_shared_scheduler > build/build_candidate.log 2>&1
+          cmake --build build --target unit_tests_dbms > build/build_candidate.log 2>&1
 
       - name: Compile exact workload-manager and executor objects
         run: |
@@ -244,7 +172,7 @@ jobs:
           from pathlib import Path
           import subprocess
 
-          binary = "build/src/unit_test_space_shared_scheduler"
+          binary = "build/src/unit_tests_dbms"
           listing = subprocess.run(
               [binary, "--gtest_list_tests", "--gtest_filter=SchedulerSpaceShared.*"],
               check=True,
@@ -279,7 +207,7 @@ jobs:
 
       - name: Run complete 94-case scheduler suite together
         run: |
-          timeout --kill-after=5s 300s build/src/unit_test_space_shared_scheduler \
+          timeout --kill-after=5s 300s build/src/unit_tests_dbms \
             --gtest_filter=SchedulerSpaceShared.* > build/test_suite.log 2>&1
           python3 - <<'PY_SUITE_COUNT'
           from pathlib import Path
@@ -307,7 +235,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v9-preflight
+          name: pr113506-combined-v10-preflight
           path: |
             build/*.log
             build/*results.*
