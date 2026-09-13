@@ -10,6 +10,8 @@
 #include <Common/MemorySpillScheduler.h>
 #include <Common/MemoryTracker.h>
 #include <Core/Field.h>
+#include <Core/ServerSettings.h>
+#include <Core/Settings.h>
 #include <Interpreters/MemoryReservationSettings.h>
 #include <Processors/IProcessor.h>
 
