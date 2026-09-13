@@ -417,6 +417,30 @@ void assertExponentialTimeDecayingFloat64TypesCompatible(
     assertExponentialTimeDecayingFloat64TypesCompatibleImpl(left_type, right_type, operation);
 }
 
+void assertExponentialTimeDecayingFloat64SetKeyTypesCompatible(
+    const DataTypePtr & probe_type, const DataTypePtr & set_type)
+{
+    if (!containsExponentialTimeDecayingFloat64(probe_type) && !containsExponentialTimeDecayingFloat64(set_type))
+        return;
+
+    const auto nested_probe_type = removeExponentialTimeDecayingTransparentWrappers(probe_type);
+    const auto nested_set_type = removeExponentialTimeDecayingTransparentWrappers(set_type);
+
+    /// The default `Variant` adaptor probes each alternative separately, while the set
+    /// retains its `Variant` type. Permit wrapping an exact alternative, including its
+    /// custom type name: tuple layout equality alone would also admit a wrong decay length.
+    if (const auto * variant = typeid_cast<const DataTypeVariant *>(nested_set_type.get()))
+    {
+        for (const auto & alternative : variant->getVariants())
+        {
+            if (nested_probe_type->getName() == alternative->getName())
+                return;
+        }
+    }
+
+    assertExponentialTimeDecayingFloat64TypesCompatible(probe_type, set_type, "IN");
+}
+
 void validateExponentialTimeDecayingFloat64Column(
     const IColumn & column, Float64 decay_length, const String & operation)
 {

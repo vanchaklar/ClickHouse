@@ -172,7 +172,7 @@ public:
             if (left_types.size() == set_types.size())
             {
                 for (size_t i = 0; i < left_types.size(); ++i)
-                    assertExponentialTimeDecayingFloat64TypesCompatible(left_types[i], set_types[i], "IN");
+                    assertExponentialTimeDecayingFloat64SetKeyTypesCompatible(left_types[i], set_types[i]);
             }
         }
 

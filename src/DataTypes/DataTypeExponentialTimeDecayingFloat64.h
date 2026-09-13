@@ -75,13 +75,17 @@ bool containsExponentialTimeDecayingFloat64(const DataTypePtr & type);
 void assertExponentialTimeDecayingFloat64TypesCompatible(
     const DataTypePtr & left_type, const DataTypePtr & right_type, const String & operation);
 
+/// Also permits an `IN` probe whose exact type is an alternative of the set's `Variant`.
+void assertExponentialTimeDecayingFloat64SetKeyTypesCompatible(
+    const DataTypePtr & probe_type, const DataTypePtr & set_type);
+
 /// Rejects rows whose redundant marker or canonical ordering fields do not match the type.
 /// Used before generic tuple comparison and sorting, which cannot see the custom type name.
 void validateExponentialTimeDecayingFloat64Column(
     const IColumn & column, Float64 decay_length, const String & operation);
 
 /// Applies the same validation recursively when the experimental value is nested in
-/// Array, Tuple, Map, Nullable, or LowCardinality.
+/// `Array`, `Tuple`, `Map`, `Variant`, `Nullable`, or `LowCardinality`.
 void validateExponentialTimeDecayingFloat64Column(
     const IColumn & column, const DataTypePtr & type, const String & operation);
 

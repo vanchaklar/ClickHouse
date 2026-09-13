@@ -491,8 +491,9 @@ ColumnPtr Set::execute(const ColumnsWithTypeAndName & columns, bool negative) co
         ColumnWithTypeAndName column_to_cast
             = {column_before_cast.column->convertToFullColumnIfConst(), column_before_cast.type, column_before_cast.name};
 
-        assertExponentialTimeDecayingFloat64TypesCompatible(
-            column_before_cast.type, data_types[i], "IN");
+        assertExponentialTimeDecayingFloat64SetKeyTypesCompatible(column_before_cast.type, data_types[i]);
+        validateExponentialTimeDecayingFloat64Column(
+            *column_before_cast.column, column_before_cast.type, "IN set probe");
 
         /// Since we have optional support for Nullable(Tuple), if `data_types[i]` is `Tuple(...)` type, then
         /// we will enter the `castColumnAccurateOrNull` path; however, it can lead to casted column type
@@ -549,10 +550,8 @@ ColumnPtr Set::execute(const ColumnsWithTypeAndName & columns, bool negative) co
             processDateTime64Column(column_to_cast, result, null_map_holder, null_map);
         }
 
-        const auto & validation_type = containsExponentialTimeDecayingFloat64(column_before_cast.type)
-            ? column_before_cast.type
-            : data_types[i];
-        validateExponentialTimeDecayingFloat64Column(*result, validation_type, "IN set probe");
+        /// The cast may wrap a scalar alternative in a `Variant`; validate its resulting layout.
+        validateExponentialTimeDecayingFloat64Column(*result, data_types[i], "IN set probe");
 
         // Append the result to materialized columns
         materialized_columns.emplace_back(std::move(result));
