@@ -1,14 +1,14 @@
-name: PR 113506 ProcessList settings plumbing preflight v4
+name: PR 113506 ProcessList settings plumbing preflight v5
 
 on:
   push:
-    branches: ['ci/pr113506-processlist-settings-validation-v4-20260913']
+    branches: ['ci/pr113506-processlist-settings-validation-v5-20260913']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr113506-processlist-settings-v4-${{ github.ref }}
+  group: pr113506-processlist-settings-v5-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -178,6 +178,7 @@ jobs:
                   clickhouse_common_io
                   clickhouse_common_config
                   ch_contrib::roaring
+                  ch_contrib::parquet
               )
           endif()
           """)
@@ -301,7 +302,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-processlist-settings-v4-preflight
+          name: pr113506-processlist-settings-v5-preflight
           path: |
             build/*.log
             build/*results.*
