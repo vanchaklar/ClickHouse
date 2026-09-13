@@ -5,8 +5,8 @@
 namespace DB
 {
 
-class ServerSettings;
-class Settings;
+struct ServerSettings;
+struct Settings;
 
 MemoryReservation::Settings getMemoryReservationSettings(
     const Settings & settings,
