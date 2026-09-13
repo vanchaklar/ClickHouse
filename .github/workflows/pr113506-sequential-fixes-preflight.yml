@@ -1,4 +1,4 @@
-name: PR 113506 combined preflight v11
+name: PR 113506 combined preflight v12
 
 on:
   push:
@@ -122,7 +122,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-recovery-${{ github.sha }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
@@ -273,7 +273,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v11-preflight
+          name: pr113506-combined-v12-preflight
           path: |
             build/*.log
             build/*results.*
