@@ -1,4 +1,4 @@
-name: PR 113506 combined preflight v10
+name: PR 113506 combined preflight v11
 
 on:
   push:
@@ -140,7 +140,37 @@ jobs:
             -DENABLE_NATS=OFF -DENABLE_RABBITMQ=OFF -DENABLE_GRPC=OFF \
             -DENABLE_PARQUET=OFF \
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
-          cmake --build build --target unit_tests_dbms > build/build_candidate.log 2>&1
+          python3 - <<'PY_BUILD'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          with open("build/build_candidate.log", "w") as log:
+              process = subprocess.Popen(
+                  ["cmake", "--build", "build", "--target", "unit_tests_dbms"],
+                  stdout=log,
+                  stderr=subprocess.STDOUT,
+                  start_new_session=True,
+              )
+              try:
+                  result = process.wait(timeout=90 * 60)
+              except subprocess.TimeoutExpired:
+                  print("Build reached the 90-minute budget; stopping all build workers.", file=log, flush=True)
+                  os.killpg(process.pid, signal.SIGTERM)
+                  try:
+                      process.wait(timeout=30)
+                  except subprocess.TimeoutExpired:
+                      pass
+                  # The leader can exit while descendants still hold cache files.
+                  try:
+                      os.killpg(process.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+                  process.wait()
+                  result = 124
+              sys.exit(result)
+          PY_BUILD
 
       - name: Compile exact workload-manager and executor objects
         run: |
@@ -224,6 +254,14 @@ jobs:
             fi
           done
 
+      - name: Record and finalize compiler cache
+        if: always()
+        run: |
+          ccache --show-stats > build/ccache_stats.log 2>&1
+          ccache --cleanup >> build/ccache_stats.log 2>&1
+          du -sk "$CCACHE_DIR" >> build/ccache_stats.log
+          df -h . >> build/ccache_stats.log
+
       - name: Save compiler cache
         if: always()
         uses: actions/cache/save@v4
@@ -235,7 +273,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v10-preflight
+          name: pr113506-combined-v11-preflight
           path: |
             build/*.log
             build/*results.*
