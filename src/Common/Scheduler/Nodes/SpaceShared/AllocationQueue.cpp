@@ -780,9 +780,10 @@ void AllocationQueue::processActivation()
             });
         if (claimed_suction != increasing_allocations.end())
         {
-            consumeSuctionClaim(*claimed_suction);
-            if (claimed_suction->increasing_hook.is_linked() && claimed_suction->memory_growth_suction_priority)
-                preferred_suction = &claimed_suction->increase;
+            ResourceAllocation * claimed_allocation = &*claimed_suction;
+            consumeSuctionClaim(*claimed_allocation);
+            if (claimed_allocation->increasing_hook.is_linked() && claimed_allocation->memory_growth_suction_priority)
+                preferred_suction = &claimed_allocation->increase;
             suction_changed = true;
         }
 
