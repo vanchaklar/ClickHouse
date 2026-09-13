@@ -1,14 +1,14 @@
-name: PR 113506 combined preflight v8
+name: PR 113506 combined preflight v9
 
 on:
   push:
-    branches: ['ci/pr113506-combined-validation-v8-20260913']
+    branches: ['ci/pr113506-combined-validation-v9-20260913']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr113506-combined-v8-${{ github.ref }}
+  group: pr113506-combined-v9-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -165,12 +165,17 @@ jobs:
               clickhouse_add_executable(
                   unit_test_space_shared_scheduler
                   Common/Scheduler/Nodes/tests/gtest_space_shared_scheduler.cpp
+                  Core/BaseSettings.cpp
+                  Core/Field.cpp
+                  Core/SettingsEnums.cpp
+                  Core/SettingsFields.cpp
                   Core/Settings.cpp
                   Core/ServerSettings.cpp
                   Interpreters/MemoryReservationSettings.cpp
                   "${CMAKE_CURRENT_BINARY_DIR}/scheduler_gtest_main.cpp"
               )
               target_compile_options(unit_test_space_shared_scheduler PRIVATE -Wno-sign-compare -Wno-header-hygiene)
+              target_link_options(unit_test_space_shared_scheduler PRIVATE -Wl,--error-limit=0)
               target_link_libraries(
                   unit_test_space_shared_scheduler PRIVATE
                   ch_contrib::gmock_all
@@ -302,7 +307,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v8-preflight
+          name: pr113506-combined-v9-preflight
           path: |
             build/*.log
             build/*results.*
