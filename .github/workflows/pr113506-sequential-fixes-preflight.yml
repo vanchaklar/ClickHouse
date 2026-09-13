@@ -1,14 +1,14 @@
-name: PR 113506 PR 113506 combined preflight v7
+name: PR 113506 combined preflight v8
 
 on:
   push:
-    branches: ['ci/pr113506-combined-validation-v7-20260913']
+    branches: ['ci/pr113506-combined-validation-v8-20260913']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr113506-combined-v7-${{ github.ref }}
+  group: pr113506-combined-v8-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -92,7 +92,7 @@ jobs:
 
   scheduler:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 120
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
@@ -178,7 +178,6 @@ jobs:
                   clickhouse_common_io
                   clickhouse_common_config
                   ch_contrib::roaring
-                  ch_contrib::parquet
               )
           endif()
           """)
@@ -206,6 +205,7 @@ jobs:
             -DENABLE_UTILS=OFF -DENABLE_JEMALLOC=OFF -DENABLE_AWS_S3=OFF \
             -DENABLE_AZURE_BLOB_STORAGE=OFF -DENABLE_HDFS=OFF -DENABLE_KAFKA=OFF \
             -DENABLE_NATS=OFF -DENABLE_RABBITMQ=OFF -DENABLE_GRPC=OFF \
+            -DENABLE_PARQUET=OFF \
             -DFAIL_ON_UNSUPPORTED_OPTIONS_COMBINATION=OFF > build/configure.log 2>&1
           cmake --build build --target unit_test_space_shared_scheduler > build/build_candidate.log 2>&1
 
@@ -302,7 +302,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v7-preflight
+          name: pr113506-combined-v8-preflight
           path: |
             build/*.log
             build/*results.*
