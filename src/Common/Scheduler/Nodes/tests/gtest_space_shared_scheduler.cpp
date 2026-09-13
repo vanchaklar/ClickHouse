@@ -9,6 +9,8 @@
 #include <Common/Scheduler/Nodes/tests/ResourceTest.h>
 #include <Common/MemorySpillScheduler.h>
 #include <Common/MemoryTracker.h>
+#include <Core/Field.h>
+#include <Interpreters/MemoryReservationSettings.h>
 #include <Processors/IProcessor.h>
 
 #include <algorithm>
@@ -112,6 +114,30 @@ struct SpaceSharedResourceHolder
         f.get();
     }
 };
+
+
+TEST(SchedulerSpaceShared, ProcessListMemoryReservationSettingsPlumbing)
+{
+    Settings query_settings;
+    query_settings.set("memory_reservation_protect_from_eviction", true);
+    query_settings.set("memory_reservation_force_spill_before_eviction", true);
+    query_settings.set("memory_reservation_suction_queue_timeout_ms", 1234);
+
+    ServerSettings server_settings;
+    server_settings.set("memory_reservation_max_allocation_before_suction_bytes", Field(UInt64(2345)));
+    server_settings.set("memory_reservation_suction_max_allocation_bytes", Field(UInt64(3456)));
+    server_settings.set("memory_reservation_suction_reserved_bytes", Field(UInt64(4567)));
+    server_settings.set("memory_reservation_suction_queue_policy", Field(String("largest_memory_first")));
+
+    const auto settings = getMemoryReservationSettings(query_settings, server_settings);
+    EXPECT_TRUE(settings.pressure_policy.protect_from_eviction);
+    EXPECT_TRUE(settings.force_spill_before_eviction);
+    EXPECT_EQ(settings.suction_queue_timeout_ms, 1234);
+    EXPECT_EQ(settings.pressure_policy.max_allocation_before_suction_bytes, 2345);
+    EXPECT_EQ(settings.pressure_policy.suction_max_allocation_bytes, 3456);
+    EXPECT_EQ(settings.pressure_policy.suction_reserved_bytes, 4567);
+    EXPECT_EQ(settings.pressure_policy.suction_queue_policy, ResourceAllocation::SuctionQueuePolicy::LargestMemoryFirst);
+}
 
 
 TEST(SchedulerSpaceShared, Smoke)
