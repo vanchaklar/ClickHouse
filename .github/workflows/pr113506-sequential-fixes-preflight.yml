@@ -1,4 +1,4 @@
-name: PR 113506 combined preflight v12
+name: PR 113506 test-object compile-only diagnostic
 
 on:
   push:
@@ -92,7 +92,7 @@ jobs:
 
   scheduler:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
@@ -126,7 +126,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-clang21-pr113506-ccache-
 
-      - name: Configure and build candidate
+      - name: Configure and compile exact production test objects
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
@@ -145,18 +145,36 @@ jobs:
           import signal
           import subprocess
           import sys
+          from pathlib import Path
+
+          listing = subprocess.run(
+              ["ninja", "-C", "build", "-t", "targets", "all"],
+              check=True, capture_output=True, text=True,
+          ).stdout
+          Path("build/ninja_targets.log").write_text(listing)
+          targets = []
+          for source in ("gtest_space_shared_scheduler.cpp.o", "gtest_workload_resource_manager.cpp.o"):
+              matches = [
+                  line.split(":", 1)[0]
+                  for line in listing.splitlines()
+                  if line.split(":", 1)[0].endswith("/" + source)
+              ]
+              if len(matches) != 1:
+                  raise RuntimeError(f"Expected one production target for {source}, found {matches}")
+              targets.append(matches[0])
+          Path("build/exact_test_targets.log").write_text("\n".join(targets) + "\n")
 
           with open("build/build_candidate.log", "w") as log:
               process = subprocess.Popen(
-                  ["cmake", "--build", "build", "--target", "unit_tests_dbms"],
+                  ["cmake", "--build", "build", "--target", *targets],
                   stdout=log,
                   stderr=subprocess.STDOUT,
                   start_new_session=True,
               )
               try:
-                  result = process.wait(timeout=90 * 60)
+                  result = process.wait(timeout=30 * 60)
               except subprocess.TimeoutExpired:
-                  print("Build reached the 90-minute budget; stopping all build workers.", file=log, flush=True)
+                  print("Test-object compilation reached the 30-minute budget; stopping all build workers.", file=log, flush=True)
                   os.killpg(process.pid, signal.SIGTERM)
                   try:
                       process.wait(timeout=30)
@@ -169,81 +187,14 @@ jobs:
                       pass
                   process.wait()
                   result = 124
+              if result == 0:
+                  Path("build/compile_only_result.log").write_text(
+                      "Both exact production test objects compiled.\n"
+                      "COMPILE ONLY: no executable linked and no tests ran.\n"
+                      "This result does not satisfy the PR publication gate.\n"
+                  )
               sys.exit(result)
           PY_BUILD
-
-      - name: Compile exact workload-manager and executor objects
-        run: |
-          ninja -C build -t targets all > build/ninja_targets.log
-          targets=()
-          for source in \
-            gtest_workload_resource_manager.cpp.o \
-            ProcessList.cpp.o \
-            MemoryReservationSettings.cpp.o \
-            ExecutionThreadContext.cpp.o \
-            ExecutingGraph.cpp.o \
-            PipelineExecutor.cpp.o \
-            JoiningTransform.cpp.o \
-            GraceHashJoin.cpp.o
-          do
-            mapfile -t matches < <(sed -n "\|/${source}:|s|:.*||p" build/ninja_targets.log)
-            if test "${#matches[@]}" -ne 1; then
-              echo "Expected one Ninja target for ${source}, found ${#matches[@]}" | tee -a build/build_objects.log
-              printf '%s\n' "${matches[@]}" | tee -a build/build_objects.log
-              exit 1
-            fi
-            targets+=("${matches[0]}")
-          done
-          cmake --build build --target "${targets[@]}" > build/build_objects.log 2>&1
-
-      - name: Run all 94 scheduler cases independently
-        run: |
-          python3 - <<'PY_INDIVIDUAL'
-          from pathlib import Path
-          import subprocess
-
-          binary = "build/src/unit_tests_dbms"
-          listing = subprocess.run(
-              [binary, "--gtest_list_tests", "--gtest_filter=SchedulerSpaceShared.*"],
-              check=True,
-              capture_output=True,
-              text=True,
-          )
-          Path("build/test_list.log").write_text(listing.stdout)
-          tests = []
-          suite = ""
-          for line in listing.stdout.splitlines():
-              if line.startswith("SchedulerSpaceShared."):
-                  suite = line.strip()
-              elif suite and line.startswith("  "):
-                  tests.append(suite + line.strip().split()[0])
-          if len(tests) != 94:
-              raise RuntimeError(f"Expected 94 scheduler tests, found {len(tests)}")
-          results = []
-          for name in tests:
-              log_path = Path("build") / f"test_individual_{name}.log"
-              with log_path.open("w") as log:
-                  result = subprocess.run(
-                      ["timeout", "--kill-after=5s", "30s", binary, f"--gtest_filter={name}"],
-                      stdout=log,
-                      stderr=subprocess.STDOUT,
-                  )
-              results.append(f"{name}\t{result.returncode}")
-              if result.returncode:
-                  Path("build/individual_results.txt").write_text("\n".join(results) + "\n")
-                  raise RuntimeError(f"{name} failed with exit {result.returncode}")
-          Path("build/individual_results.txt").write_text("\n".join(results) + "\n")
-          PY_INDIVIDUAL
-
-      - name: Run complete 94-case scheduler suite together
-        run: |
-          timeout --kill-after=5s 300s build/src/unit_tests_dbms \
-            --gtest_filter=SchedulerSpaceShared.* > build/test_suite.log 2>&1
-          python3 - <<'PY_SUITE_COUNT'
-          from pathlib import Path
-          text = Path("build/test_suite.log").read_text()
-          assert "[  PASSED  ] 94 tests." in text, text
-          PY_SUITE_COUNT
 
       - name: Print build and test failure diagnostics
         if: failure()
@@ -273,7 +224,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-combined-v12-preflight
+          name: pr113506-test-object-compile-only
           path: |
             build/*.log
             build/*results.*
