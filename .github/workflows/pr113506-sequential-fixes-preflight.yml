@@ -1,14 +1,14 @@
-name: PR 113506 ProcessList terminal reason and suction iterator preflight
+name: PR 113506 PR 113506 combined preflight v7
 
 on:
   push:
-    branches: ['ci/pr113506-processlist-settings-terminal-reason-suction-iterator-validation-20260913']
+    branches: ['ci/pr113506-combined-validation-v7-20260913']
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr113506-processlist-terminal-reason-suction-iterator-${{ github.ref }}
+  group: pr113506-combined-v7-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -92,7 +92,7 @@ jobs:
 
   scheduler:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       CCACHE_DIR: ${{ github.workspace }}/tmp/pr113506-ccache
       CCACHE_MAXSIZE: 2G
@@ -302,7 +302,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pr113506-processlist-terminal-reason-suction-iterator-preflight
+          name: pr113506-combined-v7-preflight
           path: |
             build/*.log
             build/*results.*
