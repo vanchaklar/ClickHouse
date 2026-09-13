@@ -329,11 +329,20 @@ void MemoryReservation::Metrics::apply()
 
 void MemoryReservation::killAllocation(const std::exception_ptr & reason)
 {
-    onGrowthPressureResolved();
-    std::unique_lock lock(mutex);
-    metrics.killed++;
-    kill_reason = reason;
-    cv.notify_all(); // notify syncWithMemoryTracker
+    std::shared_ptr<MemorySpillScheduler> scheduler;
+    {
+        std::unique_lock lock(mutex);
+        metrics.killed++;
+        kill_reason = reason;
+        growth_recovery_active = false;
+        recovery_epoch = 0;
+        reported_recovery_epoch = 0;
+        recovery_started_at = {};
+        scheduler = memory_spill_scheduler.lock();
+        cv.notify_all(); // notify syncWithMemoryTracker
+    }
+    if (scheduler)
+        scheduler->finishMemoryPressure();
 }
 
 void MemoryReservation::increaseApproved(const IncreaseRequest & increase)
@@ -373,16 +382,25 @@ void MemoryReservation::decreaseApproved(const DecreaseRequest & decrease)
 
 void MemoryReservation::allocationFailed(const std::exception_ptr & reason)
 {
-    onGrowthPressureResolved();
-    std::unique_lock lock(mutex);
-    metrics.failed++;
-    fail_reason = reason;
-    removed = true; // failed allocation are auto-removed by the scheduler
-    if (enqueued_demand != 0)
-        demand_increment.sub(enqueued_demand);
-    approved_increment.sub(allocated_size);
-    allocated_size = 0;
-    cv.notify_all(); // notify dtor (e.g. for removal of pending allocation or queue purge) or syncWithMemoryTracker
+    std::shared_ptr<MemorySpillScheduler> scheduler;
+    {
+        std::unique_lock lock(mutex);
+        metrics.failed++;
+        fail_reason = reason;
+        removed = true; // failed allocation are auto-removed by the scheduler
+        if (enqueued_demand != 0)
+            demand_increment.sub(enqueued_demand);
+        approved_increment.sub(allocated_size);
+        allocated_size = 0;
+        growth_recovery_active = false;
+        recovery_epoch = 0;
+        reported_recovery_epoch = 0;
+        recovery_started_at = {};
+        scheduler = memory_spill_scheduler.lock();
+        cv.notify_all(); // notify dtor (e.g. for removal of pending allocation or queue purge) or syncWithMemoryTracker
+    }
+    if (scheduler)
+        scheduler->finishMemoryPressure();
 }
 
 }
