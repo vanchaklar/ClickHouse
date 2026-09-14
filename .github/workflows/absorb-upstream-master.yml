@@ -1,0 +1,59 @@
+name: Absorb upstream master
+
+on:
+  push:
+    branches:
+      - sync/absorb-master-20260914-run
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Merge upstream master into active branches
+        shell: bash
+        run: |
+          set -u
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/ClickHouse/ClickHouse.git
+          git fetch --filter=blob:none upstream master
+
+          branches=(
+            "agent/refreshable-mv-workload"
+            "memory-growth-yield"
+            "agent/experimental-queue-table-engine"
+          )
+
+          failed=0
+          for branch in "${branches[@]}"; do
+            echo "===== $branch ====="
+            git fetch --filter=blob:none origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git switch --detach "refs/remotes/origin/${branch}"
+
+            if git merge-base --is-ancestor upstream/master HEAD; then
+              echo "Already contains upstream master"
+              continue
+            fi
+
+            if git merge --no-ff --no-edit upstream/master; then
+              git push origin "HEAD:refs/heads/${branch}"
+              echo "SYNCED ${branch} $(git rev-parse HEAD)"
+            else
+              failed=1
+              echo "CONFLICTS ${branch}"
+              git diff --name-only --diff-filter=U
+              git status --short
+              git diff --cc
+              git merge --abort
+            fi
+          done
+
+          exit "$failed"
