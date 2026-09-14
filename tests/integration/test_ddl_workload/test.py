@@ -17,7 +17,7 @@ node_on: ClickHouseInstance = cluster.add_instance(
     stay_alive=True,
     main_configs=["configs/use_ddl_workload.xml"],
     with_zookeeper=True,
-    cpu_limit=15,
+    cpu_limit=4,
 )
 
 # node_off: use_ddl_workload=0 (default) -> DDL is exempt from workload admission (hard skip).
@@ -26,7 +26,7 @@ node_off: ClickHouseInstance = cluster.add_instance(
     stay_alive=True,
     main_configs=["configs/no_ddl_workload.xml"],
     with_zookeeper=True,
-    cpu_limit=15,
+    cpu_limit=4,
 )
 
 
