@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           filter: blob:none
 
       - name: Merge upstream master into active branches
@@ -24,7 +24,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/ClickHouse/ClickHouse.git
-          git fetch --filter=blob:none upstream master
 
           branches=(
             "agent/refreshable-mv-workload"
@@ -32,10 +31,14 @@ jobs:
             "agent/experimental-queue-table-engine"
           )
 
+          for branch in "${branches[@]}"; do
+            git fetch --filter=blob:none --no-tags origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+          done
+          git fetch --filter=blob:none --no-tags upstream master
+
           failed=0
           for branch in "${branches[@]}"; do
             echo "===== $branch ====="
-            git fetch --filter=blob:none origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
             git switch --detach "refs/remotes/origin/${branch}"
 
             if git merge-base --is-ancestor upstream/master HEAD; then
