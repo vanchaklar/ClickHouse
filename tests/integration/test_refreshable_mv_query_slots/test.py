@@ -12,12 +12,14 @@ cluster = ClickHouseCluster(__file__)
 node = cluster.add_instance(
     "node",
     main_configs=["configs/query_slots.xml"],
+    cpu_limit=4,
     with_zookeeper=True,
     stay_alive=True,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
 )
 legacy = cluster.add_instance(
     "legacy",
+    cpu_limit=4,
     with_zookeeper=True,
     stay_alive=True,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
@@ -25,6 +27,7 @@ legacy = cluster.add_instance(
 ddl = cluster.add_instance(
     "ddl",
     main_configs=["configs/query_slots.xml", "configs/ddl_workload.xml"],
+    cpu_limit=4,
     with_zookeeper=True,
     stay_alive=True,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
