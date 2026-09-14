@@ -6,7 +6,6 @@ import pytest
 
 from helpers.cluster import ClickHouseCluster
 
-
 cluster = ClickHouseCluster(__file__)
 node = cluster.add_instance("node", main_configs=["configs/small_pool.xml"])
 
@@ -89,9 +88,12 @@ def test_queued_long_refreshes_do_not_starve_fast_refreshes():
             )
 
         # Verify the actual pool cap, not just the XML configuration.
-        assert node.query(
-            "SELECT value FROM system.metrics WHERE metric='BackgroundSchedulePoolSize'"
-        ).strip() == "5"
+        assert (
+            node.query(
+                "SELECT value FROM system.metrics WHERE metric='BackgroundSchedulePoolSize'"
+            ).strip()
+            == "5"
+        )
 
         for view_id in range(SLOW_VIEWS):
             node.query(f"SYSTEM REFRESH VIEW starvation.slow_{view_id}")
@@ -101,18 +103,23 @@ def test_queued_long_refreshes_do_not_starve_fast_refreshes():
             states = slow_state()
             assert not any(view["exception"] for view in states), states
             running = [view for view in states if view["status"] == "Running"]
-            waiting = [view for view in states if view["status"] == "WaitingForResource"]
+            waiting = [
+                view for view in states if view["status"] == "WaitingForResource"
+            ]
             if len(running) == 1 and len(waiting) == SLOW_VIEWS - 1:
                 break
             assert time.monotonic() < admission_deadline, diagnostics()
             time.sleep(0.1)
 
         first_running = running[0]["view"]
-        assert node.query(
-            "SELECT count() FROM system.background_schedule_pool "
-            "WHERE pool='schedule' AND database='starvation' "
-            "AND startsWith(table, 'slow_') AND log_name='RefreshExec' AND executing"
-        ).strip() == "1"
+        assert (
+            node.query(
+                "SELECT count() FROM system.background_schedule_pool "
+                "WHERE pool='schedule' AND database='starvation' "
+                "AND startsWith(table, 'slow_') AND log_name='RefreshExec' AND executing"
+            ).strip()
+            == "1"
+        )
 
         # Observe every view individually. Aggregate throughput alone could hide starvation
         # of some views while others keep refreshing. The schedule remains one second;
@@ -154,16 +161,22 @@ def test_queued_long_refreshes_do_not_starve_fast_refreshes():
             completed = [
                 view for view in states if view["last_success_duration_ms"] is not None
             ]
-            waiting = [view for view in states if view["status"] == "WaitingForResource"]
+            waiting = [
+                view for view in states if view["status"] == "WaitingForResource"
+            ]
             # Releasing the slot and publishing the finished refresh state are separate steps.
             # The next view may already be admitted before the previous completion is visible.
             assert len(waiting) >= SLOW_VIEWS - 2, diagnostics()
             if completed:
                 assert len(completed) == 1, states
                 assert completed[0]["view"] == first_running, states
-                assert int(completed[0]["last_success_duration_ms"]) >= SLOW_DURATION_SECONDS * 1000, states
+                assert (
+                    int(completed[0]["last_success_duration_ms"])
+                    >= SLOW_DURATION_SECONDS * 1000
+                ), states
                 next_running = [
-                    view for view in states
+                    view
+                    for view in states
                     if view["status"] == "Running" and view["view"] != first_running
                 ]
                 if len(next_running) == 1 and len(waiting) == SLOW_VIEWS - 2:
@@ -180,7 +193,11 @@ def test_queued_long_refreshes_do_not_starve_fast_refreshes():
         logging.info(
             "Pool starvation test: duration=%.1fs, fast_views=%d, "
             "refreshes_per_fast_view_min=%d, max=%d, max_observed_stall=%.2fs",
-            time.monotonic() - started, FAST_VIEWS, min(refreshes), max(refreshes), maximum_stall,
+            time.monotonic() - started,
+            FAST_VIEWS,
+            min(refreshes),
+            max(refreshes),
+            maximum_stall,
         )
     finally:
         # Cancel the remaining long queries after observing the first slot handoff.
