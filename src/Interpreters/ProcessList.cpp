@@ -110,6 +110,29 @@ static bool isUnlimitedQuery(const IAST * ast)
     return false;
 }
 
+bool isDDLQuery(const IAST * ast)
+{
+    if (!ast)
+        return false;
+
+    switch (ast->getQueryKind())
+    {
+        case IAST::QueryKind::Create:
+        case IAST::QueryKind::Drop:
+        case IAST::QueryKind::Undrop:
+        case IAST::QueryKind::Rename:
+        case IAST::QueryKind::Alter:
+        case IAST::QueryKind::Optimize:
+        case IAST::QueryKind::Move:
+        case IAST::QueryKind::Grant:
+        case IAST::QueryKind::Revoke:
+        case IAST::QueryKind::System:
+            return true;
+        default:
+            return false;
+    }
+}
+
 ProcessList::EntryPtr ProcessList::insert(
     const String & query_,
     UInt64 normalized_query_hash,
@@ -117,7 +140,8 @@ ProcessList::EntryPtr ProcessList::insert(
     ContextMutablePtr query_context,
     UInt64 watch_start_nanoseconds,
     bool is_internal,
-    QuerySlotPtr query_slot)
+    QuerySlotPtr query_slot,
+    bool skip_workload_admission)
 {
     EntryPtr res;
 
@@ -140,7 +164,9 @@ ProcessList::EntryPtr ProcessList::insert(
     // and memory reservations together as a single allocation. Splitting their admission across the
     // `ProcessList` mutex would prevent that unification and is a worse design overall.
     MemoryReservationPtr memory_reservation;
-    if (!is_unlimited_query)
+    /// DDL can skip workload admission while remaining subject to the server-wide concurrency limits.
+    /// A pre-granted RMV slot is still transferred to QueryStatus without acquiring another slot.
+    if (!is_unlimited_query && !skip_workload_admission)
     {
         /// Hold a shared_ptr to keep the storage alive for the duration of this call, in case of concurrent shutdown.
         auto workload_entity_storage = query_context->getWorkloadEntityStoragePtr();

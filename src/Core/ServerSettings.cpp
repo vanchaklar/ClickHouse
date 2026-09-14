@@ -1260,8 +1260,11 @@ Defines behaviour on access to unknown WORKLOAD with query setting 'workload'.
 **See Also**
 - [Workload Scheduling](/concepts/features/configuration/server-config/workload-scheduling)
 )", 0) \
+    DECLARE(Bool, use_ddl_workload, false, R"(
+Controls how DDL and administrative queries (CREATE, DROP, ALTER, RENAME, OPTIMIZE, MOVE, GRANT, REVOKE, SYSTEM, ...) participate in workload scheduling. When disabled (default), such queries are exempt from workload query-slot and memory-reservation admission, so they never queue behind regular queries. When enabled, they are admitted under the workload named by the `ddl_workload` query setting instead of `workload`. Note: the default behavior is a change from previous versions, where DDL shared the `workload` setting with regular queries. DDL wrapped by another statement (e.g. `EXECUTE AS <user> <ddl>` or `X PARALLEL WITH Y`) runs as an internal query and is exempt from workload admission regardless of this setting.
+)", 0) \
     DECLARE(Bool, use_query_slot_to_refresh_materialized_view, false, R"(
-When enabled, refreshable materialized views request a query slot before starting refresh execution. The stored SELECT setting `refresh_workload` selects the refresh workload; when empty, the existing `workload` setting is used. This requires a configured QUERY resource for that workload. While queued, the refresh reports `WaitingForResource` in `system.view_refreshes` without occupying a background execution worker.
+When enabled, refreshable materialized views request a query slot before starting refresh execution. The stored SELECT setting `workload` selects the refresh workload. This requires a configured QUERY resource for that workload. While queued, the refresh reports `WaitingForResource` in `system.view_refreshes` without occupying a background execution worker.
 
 Disabled by default for compatibility: existing refreshes continue to bypass QUERY admission, while their SELECT workload still applies to execution. Requires a server restart.
 )", 0) \
@@ -3633,6 +3636,7 @@ ChangeableSettingsMap collectChangeableServerSettings(ContextPtr context)
             {"show_license_expiration_warnings", {std::to_string(context->getShowLicenseExpirationWarnings()), ChangeableWithoutRestart::Yes}},
             {"throw_on_unknown_workload", {std::to_string(context->getThrowOnUnknownWorkload()), ChangeableWithoutRestart::Yes}},
             {"cpu_slot_preemption", {std::to_string(context->getCPUSlotPreemption()), ChangeableWithoutRestart::Yes}},
+            {"use_ddl_workload", {std::to_string(context->getUseDdlWorkload()), ChangeableWithoutRestart::Yes}},
             {"cpu_slot_quantum_ns", {std::to_string(context->getCPUSlotQuantum()), ChangeableWithoutRestart::Yes}},
             {"cpu_slot_preemption_timeout_ms", {std::to_string(context->getCPUSlotPreemptionTimeout()), ChangeableWithoutRestart::Yes}},
             {"config_reload_interval_ms", {std::to_string(context->getConfigReloaderInterval()), ChangeableWithoutRestart::Yes}},

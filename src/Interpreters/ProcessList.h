@@ -45,6 +45,11 @@ class ThreadGroup;
 using ThreadGroupPtr = std::shared_ptr<ThreadGroup>;
 class ProcessListEntry;
 
+/// True for DDL / administrative statements (schema DDL, access control, SYSTEM), by query kind.
+/// Used to route DDL through the `ddl_workload` setting and to exempt it from workload admission
+/// when `use_ddl_workload` is disabled (see ProcessList::insert and executeQuery).
+bool isDDLQuery(const IAST * ast);
+
 /// Forward-declare to avoid pulling the whole scheduler stack into every TU that includes this header.
 /// The unique_ptr destructor is instantiated only in ProcessList.cpp where MemoryReservation.h is included.
 struct MemoryReservation;
@@ -481,7 +486,8 @@ public:
       * Don't count KILL QUERY queries or async insert flush queries
       */
     /// A supplied query slot must already be granted; its lifetime is transferred to QueryStatus.
-    EntryPtr insert(const String & query_, UInt64 normalized_query_hash, const IAST * ast, ContextMutablePtr query_context, UInt64 watch_start_nanoseconds, bool is_internal, QuerySlotPtr query_slot = {});
+    /// Skipping workload admission does not bypass the server-wide concurrency limits.
+    EntryPtr insert(const String & query_, UInt64 normalized_query_hash, const IAST * ast, ContextMutablePtr query_context, UInt64 watch_start_nanoseconds, bool is_internal, QuerySlotPtr query_slot = {}, bool skip_workload_admission = false);
 
     /// Number of currently executing queries.
     /// WARNING: includes internal queries (e.g. those executed by dictionaries, RMVs, async inserts).
