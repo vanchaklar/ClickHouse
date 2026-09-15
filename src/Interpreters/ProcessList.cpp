@@ -309,6 +309,7 @@ ProcessList::EntryPtr ProcessList::insert(
                         "Too many simultaneous queries for user {}. "
                         "Current: {}, maximum: {}",
                         client_info.current_user,
+                        user_process_list->second.non_internal_queries,
                         settings[Setting::max_concurrent_queries_for_user].toString());
 
                 auto running_query = user_process_list->second.queries.find(client_info.current_query_id);
@@ -1090,7 +1091,7 @@ ProcessListForUser::ProcessListForUser(ContextPtr global_context, ProcessList * 
 
 ProcessListForUserInfo ProcessListForUser::getInfo(bool get_profile_events) const
 {
-    ProcessListForUserInfo res;
+    ProcessListForUserInfo res{};
 
     res.memory_usage = user_memory_tracker.get();
     res.peak_memory_usage = user_memory_tracker.getPeak();
