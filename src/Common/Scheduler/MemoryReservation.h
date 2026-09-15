@@ -4,8 +4,8 @@
 #include <Common/Scheduler/ResourceLink.h>
 #include <Common/CurrentMetrics.h>
 
-#include <memory>
 #include <chrono>
+#include <memory>
 #include <mutex>
 
 class MemoryTracker;
@@ -32,7 +32,7 @@ class MemorySpillScheduler;
 ///             |
 ///      AllocationQueue       <-- leaf; reservations attach here (IAllocationQueue)
 ///             |  ^ requests  : insert / increase / decrease / remove
-///  - - - - - -+- - - - - - - - - - - - - - -  scheduler thread / query threads
+///  - - - - - -+- - - - - - - - - - - - - -  scheduler thread / query threads
 ///             |  v approvals : increase / decrease / kill / fail
 ///     MemoryReservation      <-- owned by QueryStatus (a ResourceAllocation)
 ///             |                  syncWithMemoryTracker()
@@ -58,9 +58,23 @@ public:
         UInt64 suction_queue_timeout_ms = 0;
     };
 
-    // Blocks until reservation is admitted iff reserved_size > 0
+    // Blocks until the reservation is admitted iff reserved_size > 0. `admission_deadline_` is an absolute
+    // steady_clock deadline shared with the query slot so the whole admission phase uses one budget; on
+    // expiry the still-pending allocation is canceled and a `MEMORY_RESERVATION_ACQUISITION_TIMEOUT`
+    // exception is thrown. `time_point::max()` means no timeout.
     MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size);
     MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size, Settings settings_);
+    MemoryReservation(
+        ResourceLink link,
+        const String & id_,
+        ResourceCost reserved_size,
+        std::chrono::steady_clock::time_point admission_deadline_);
+    MemoryReservation(
+        ResourceLink link,
+        const String & id_,
+        ResourceCost reserved_size,
+        std::chrono::steady_clock::time_point admission_deadline_,
+        Settings settings_);
     ~MemoryReservation() override;
 
     // Sync actual size with MemoryTracker, issues and waits increase/decrease requests as needed.
