@@ -1,151 +1,262 @@
-#pragma once
-
-#include <Common/Scheduler/ResourceAllocation.h>
-#include <Common/Scheduler/ResourceLink.h>
+#include <Common/Scheduler/MemoryReservation.h>
+#include <Common/Scheduler/IAllocationQueue.h>
+#include <Common/MemoryTracker.h>
+#include <Common/ProfileEvents.h>
 #include <Common/CurrentMetrics.h>
+#include <Common/CurrentThread.h>
+#include <base/defines.h>
 
-#include <chrono>
-#include <memory>
-#include <mutex>
 
-class MemoryTracker;
+namespace ProfileEvents
+{
+    extern const Event MemoryReservationAdmitMicroseconds;
+    extern const Event MemoryReservationIncreaseMicroseconds;
+    extern const Event MemoryReservationIncreases;
+    extern const Event MemoryReservationDecreases;
+    extern const Event MemoryReservationKilled;
+    extern const Event MemoryReservationFailed;
+}
+
+namespace CurrentMetrics
+{
+    extern const Metric MemoryReservationApproved;
+    extern const Metric MemoryReservationDemand;
+}
 
 namespace DB
 {
 
-class MemorySpillScheduler;
-
-/// `MemoryReservation` bridges a running query and the memory scheduler: the scheduler caps each
-/// workload's memory while the query's `MemoryTracker` stays the source of truth. It backs:
-///   CREATE RESOURCE memory (MEMORY RESERVATION)
-///   CREATE WORKLOAD all SETTINGS max_memory = '1Gi'
-///   SELECT ... SETTINGS workload = 'all', reserve_memory = '100Mi'
-/// The scheduler sees usage as `allocated = max(actual_size, reserve_memory)` and guarantees the
-/// total `allocated` under each workload does not exceed its `max_memory` limit.
-/// A single scheduler thread (top) serves many query/pipeline threads (bottom):
-///
-///    SpaceSharedScheduler    <-- dedicated thread + EventQueue (root)
-///             |
-///      AllocationLimit       <-- caps max_memory
-///             |
-///    Fair / Precedence       <-- share / order sibling workloads
-///             |
-///      AllocationQueue       <-- leaf; reservations attach here (IAllocationQueue)
-///             |  ^ requests  : insert / increase / decrease / remove
-///  - - - - - -+- - - - - - - - - - - - - -  scheduler thread / query threads
-///             |  v approvals : increase / decrease / kill / fail
-///     MemoryReservation      <-- owned by QueryStatus (a ResourceAllocation)
-///             |                  syncWithMemoryTracker()
-///      PipelineExecutor      <-- drives query execution
-///             |                  read on each sync point
-///       MemoryTracker        <-- actual bytes used (source of truth)
-///
-/// The `workload` setting resolves (via `WorkloadResourceManager`) to a `ResourceLink` naming that
-/// workload's `AllocationQueue`. A reservation's life: construct (`insertAllocation`; blocks until
-/// admitted when `reserve_memory > 0`), sync (`syncWithMemoryTracker` issues at most one increase or
-/// decrease per call; may be killed under pressure), destruct (`removeAllocation`, wait for removal).
-/// Requests bubble up to the root and are approved on the scheduler thread; the scheduler-side nodes
-/// (`AllocationLimit`, `Fair`/`PrecedenceAllocation`, `AllocationQueue`) form one `ISpaceSharedNode`
-/// subtree per `WorkloadNode`. See also `IAllocationQueue`, `ISpaceSharedNode`,
-/// `IncreaseRequest`/`DecreaseRequest`.
-struct MemoryReservation : public ResourceAllocation
+namespace ErrorCodes
 {
-public:
-    struct Settings
+    extern const int MEMORY_RESERVATION_KILLED;
+    extern const int MEMORY_RESERVATION_FAILED;
+}
+
+MemoryReservation::MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size_)
+    : ResourceAllocation(*link.allocation_queue, id_)
+    , reserved_size(reserved_size_)
+    , approved_increment(CurrentMetrics::MemoryReservationApproved, 0)
+    , demand_increment(CurrentMetrics::MemoryReservationDemand, 0)
+{
+    chassert(link.allocation_queue);
+    actual_size = reserved_size;
+
+    if (reserved_size > 0)
     {
-        MemoryPressurePolicy pressure_policy;
-        bool force_spill_before_eviction = false;
-        UInt64 suction_queue_timeout_ms = 0;
-    };
-
-    // Blocks until the reservation is admitted iff reserved_size > 0. `admission_deadline_` is an absolute
-    // steady_clock deadline shared with the query slot so the whole admission phase uses one budget; on
-    // expiry the still-pending allocation is canceled and a `MEMORY_RESERVATION_ACQUISITION_TIMEOUT`
-    // exception is thrown. `time_point::max()` means no timeout.
-    MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size);
-    MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size, Settings settings_);
-    MemoryReservation(
-        ResourceLink link,
-        const String & id_,
-        ResourceCost reserved_size,
-        std::chrono::steady_clock::time_point admission_deadline_);
-    MemoryReservation(
-        ResourceLink link,
-        const String & id_,
-        ResourceCost reserved_size,
-        std::chrono::steady_clock::time_point admission_deadline_,
-        Settings settings_);
-    ~MemoryReservation() override;
-
-    // Sync actual size with MemoryTracker, issues and waits increase/decrease requests as needed.
-    void syncWithMemoryTracker(const MemoryTracker * memory_tracker);
-
-    /// Pipeline threads bind the query-scoped spill controller once their ThreadGroup exists.
-    void setMemorySpillScheduler(const std::shared_ptr<MemorySpillScheduler> & scheduler);
-
-private:
-    void throwIfNeeded();
-
-    // Unlinks this allocation from the scheduler and waits until removal completes.
-    // Used both by the destructor and by the constructor when admission fails, so a throwing
-    // constructor never leaves a dangling pointer in the scheduler.
-    void detachFromQueue();
-
-    // Interaction with the scheduler thread
-    void killAllocation(const std::exception_ptr & reason) override;
-    void increaseApproved(const IncreaseRequest & increase) override;
-    void decreaseApproved(const DecreaseRequest & decrease) override;
-    void allocationFailed(const std::exception_ptr & reason) override;
-    GrowthPressureAction onGrowthPressure() override;
-    void onGrowthPressureResolved() override;
-    void onSuctionStarted() override {}
-    bool isGrowthRecoveryActive() override;
-    bool canRecoverFromGrowthPressure() const override
-    {
-        return settings.force_spill_before_eviction || isProtectedFromEviction();
+        // Scheduler may call increaseApproved() immediately after insert, so set state beforehand
+        enqueued_demand = reserved_size;
+        demand_increment.add(enqueued_demand);
     }
-    ResourceCost reconcilePendingIncrease(ResourceCost scheduler_allocated_size, ResourceCost requested_size) override;
-    void increaseCancelled() override;
 
-    const ResourceCost reserved_size; // value of `reserve_memory` query setting
-    const Settings settings;
+    queue.insertAllocation(*this, reserved_size);
 
-    /// Protects all the fields in this allocation that may be accessed from the scheduler thread.
-    /// Lock ordering: AllocationQueue::mutex -> MemoryReservation::mutex (scheduler thread acquires
-    /// AllocationQueue::mutex first, then calls callbacks that acquire this mutex).
-    /// User-thread paths release this mutex before calling queue operations.
-    std::mutex mutex;
-    std::condition_variable cv;
-
-    std::exception_ptr kill_reason;
-    std::exception_ptr fail_reason;
-    bool removed = false;
-    ResourceCost allocated_size = 0; // equals ResourceAllocation::allocated, which is private and controlled by the scheduler
-    ResourceCost actual_size = 0; // real size of the resource used by the allocation
-    ResourceCost enqueued_demand = 0; // amount added to demand_increment when increase was enqueued
-    ResourceCost enqueued_decrease = 0; // size of the in-flight decrease request
-
-    std::weak_ptr<MemorySpillScheduler> memory_spill_scheduler;
-    bool growth_recovery_active = false;
-    UInt64 recovery_epoch = 0;
-    UInt64 reported_recovery_epoch = 0;
-    std::chrono::steady_clock::time_point recovery_started_at;
-
-    /// Helper struct. Holds postponed ProfileEvents increments to be executed from a query thread.
-    struct Metrics
+    if (reserved_size > 0)
     {
-        UInt64 increases = 0;
-        UInt64 decreases = 0;
-        UInt64 failed = 0;
-        UInt64 killed = 0;
-        void apply();
-    } metrics;
+        bool admitted = false;
+        {
+            std::unique_lock lock(mutex);
+            auto admit_timer = CurrentThread::getProfileEvents().timer(ProfileEvents::MemoryReservationAdmitMicroseconds);
+            cv.wait(lock, [this] { return kill_reason || fail_reason || actual_size <= allocated_size; });
+            // Flush deferred profile-event counters before potentially throwing,
+            // so failure metrics (e.g. MemoryReservationFailed) are not lost.
+            metrics.apply();
+            admitted = !kill_reason && !fail_reason;
+        }
 
-    /// Introspection
-    CurrentMetrics::Increment approved_increment;
-    CurrentMetrics::Increment demand_increment;
-};
+        if (!admitted)
+        {
+            // `insertAllocation` above linked this object into the scheduler. Throwing straight
+            // from the constructor would skip `~MemoryReservation`, so `removeAllocation` would
+            // never run and the scheduler would keep a dangling pointer to a destroyed object
+            // (the base `~ResourceAllocation` only has debug-only checks). Unlink first, then
+            // report the failure.
+            detachFromQueue();
+            std::unique_lock lock(mutex);
+            throwIfNeeded();
+        }
+    }
+}
 
-using MemoryReservationPtr = std::unique_ptr<MemoryReservation>;
+MemoryReservation::~MemoryReservation()
+{
+    detachFromQueue();
+}
+
+void MemoryReservation::detachFromQueue()
+{
+    {
+        std::unique_lock lock(mutex);
+        if (removed)
+        {
+            chassert(allocated_size == 0);
+            metrics.apply();
+            return;
+        }
+        if (fail_reason)
+        {
+            metrics.apply();
+            return;
+        }
+        actual_size = 0;
+    }
+
+    // removeAllocation handles everything on the scheduler thread:
+    // cancels any pending increase, prepares decrease to zero.
+    queue.removeAllocation(*this);
+
+    {
+        std::unique_lock lock(mutex);
+        cv.wait(lock, [this]() { return removed || fail_reason; });
+        metrics.apply();
+    }
+}
+
+void MemoryReservation::syncWithMemoryTracker(const MemoryTracker * memory_tracker)
+{
+    ResourceCost pending_increase = 0;
+    ResourceCost pending_decrease = 0;
+    {
+        std::unique_lock lock(mutex);
+
+        // Serialization: block all threads while an increase is pending.
+        // Multiple query threads may call syncWithMemoryTracker concurrently
+        // (the MemoryTracker reflects total memory across all threads).
+        // By blocking here we ensure at most one increase is in flight at a time.
+        if (enqueued_demand != 0)
+            cv.wait(lock, [this] { return enqueued_demand == 0 || kill_reason || fail_reason; });
+
+        throwIfNeeded();
+
+        // Make sure reservation size is always respected
+        ResourceCost new_actual_size = std::max(memory_tracker->get(), reserved_size);
+
+        // Decreases are approved asynchronously: an increase sized against the current allocated
+        // value would end short by the in-flight decrease, and the wait below would never finish.
+        // Size requests against the value the allocation will hold once the decrease is approved.
+        ResourceCost expected_allocated = allocated_size - enqueued_decrease;
+
+        // An unchanged tracker value alone does not imply there is nothing to do: a shortfall or
+        // excess may remain from an earlier sync, so skip only when fully in sync.
+        if (new_actual_size == actual_size && new_actual_size == expected_allocated)
+            return;
+
+        actual_size = new_actual_size;
+
+        if (actual_size > expected_allocated)
+        {
+            chassert(!removed);
+            pending_increase = actual_size - expected_allocated;
+            enqueued_demand = pending_increase;
+            demand_increment.add(enqueued_demand);
+        }
+        else if (actual_size < expected_allocated && enqueued_decrease == 0)
+        {
+            chassert(!removed);
+            pending_decrease = expected_allocated - actual_size;
+            enqueued_decrease = pending_decrease;
+        }
+    }
+
+    // Called outside mutex to respect lock ordering (AllocationQueue::mutex -> this mutex).
+    if (pending_increase > 0)
+        queue.increaseAllocation(*this, pending_increase);
+    else if (pending_decrease > 0)
+        queue.decreaseAllocation(*this, pending_decrease);
+
+    {
+        std::unique_lock lock(mutex);
+        // Wait on increase to make sure memory is reserved when requested.
+        // Decrease is not waited for, but counted as already gone: once approved,
+        // its capacity may be granted to another workload.
+        if (actual_size > allocated_size - enqueued_decrease)
+        {
+            auto increase_timer = CurrentThread::getProfileEvents().timer(ProfileEvents::MemoryReservationIncreaseMicroseconds);
+            cv.wait(lock, [this] { return kill_reason || fail_reason || actual_size <= allocated_size - enqueued_decrease; });
+        }
+
+        metrics.apply();
+        throwIfNeeded();
+    }
+}
+
+void MemoryReservation::throwIfNeeded()
+{
+    if (kill_reason)
+        throw Exception(ErrorCodes::MEMORY_RESERVATION_KILLED, "Kill reason: {}", getExceptionMessage(kill_reason, /* with_stacktrace = */ false));
+    if (fail_reason)
+        throw Exception(ErrorCodes::MEMORY_RESERVATION_FAILED, "Fail reason: {}", getExceptionMessage(fail_reason, /* with_stacktrace = */ false));
+}
+
+void MemoryReservation::Metrics::apply()
+{
+    if (increases)
+        ProfileEvents::increment(ProfileEvents::MemoryReservationIncreases, increases);
+    if (decreases)
+        ProfileEvents::increment(ProfileEvents::MemoryReservationDecreases, decreases);
+    if (failed)
+        ProfileEvents::increment(ProfileEvents::MemoryReservationFailed, failed);
+    if (killed)
+        ProfileEvents::increment(ProfileEvents::MemoryReservationKilled, killed);
+    increases = 0;
+    decreases = 0;
+    failed = 0;
+    killed = 0;
+}
+
+void MemoryReservation::killAllocation(const std::exception_ptr & reason)
+{
+    std::unique_lock lock(mutex);
+    metrics.killed++;
+    kill_reason = reason;
+    cv.notify_all(); // notify syncWithMemoryTracker
+}
+
+void MemoryReservation::increaseApproved(const IncreaseRequest & increase)
+{
+    std::unique_lock lock(mutex);
+    metrics.increases++;
+    allocated_size += increase.size;
+    approved_increment.add(increase.size);
+    demand_increment.sub(enqueued_demand);
+    enqueued_demand = 0;
+    cv.notify_all();
+}
+
+void MemoryReservation::decreaseApproved(const DecreaseRequest & decrease)
+{
+    std::unique_lock lock(mutex);
+    metrics.decreases++;
+    chassert(allocated_size >= decrease.size);
+    allocated_size -= decrease.size;
+    approved_increment.sub(decrease.size);
+    enqueued_decrease = 0;
+    if (decrease.removing_allocation)
+    {
+        // The queue cancels any pending increase as part of the removal path
+        // (`processActivation` unlinks from `increasing_allocations` without calling
+        // `increaseApproved`). Roll back the demand so threads blocked on the
+        // serialization barrier in `syncWithMemoryTracker` are released.
+        if (enqueued_demand != 0)
+        {
+            demand_increment.sub(enqueued_demand);
+            enqueued_demand = 0;
+        }
+        removed = true;
+    }
+    cv.notify_all();
+}
+
+void MemoryReservation::allocationFailed(const std::exception_ptr & reason)
+{
+    std::unique_lock lock(mutex);
+    metrics.failed++;
+    fail_reason = reason;
+    removed = true; // failed allocation are auto-removed by the scheduler
+    if (enqueued_demand != 0)
+        demand_increment.sub(enqueued_demand);
+    approved_increment.sub(allocated_size);
+    allocated_size = 0;
+    cv.notify_all(); // notify dtor (e.g. for removal of pending allocation or queue purge) or syncWithMemoryTracker
+}
 
 }
