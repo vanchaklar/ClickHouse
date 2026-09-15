@@ -31,14 +31,34 @@ namespace ErrorCodes
 {
     extern const int MEMORY_RESERVATION_KILLED;
     extern const int MEMORY_RESERVATION_FAILED;
+    extern const int MEMORY_RESERVATION_ACQUISITION_TIMEOUT;
 }
 
 MemoryReservation::MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size_)
-    : MemoryReservation(link, id_, reserved_size_, Settings{})
+    : MemoryReservation(link, id_, reserved_size_, std::chrono::steady_clock::time_point::max(), Settings{})
 {
 }
 
 MemoryReservation::MemoryReservation(ResourceLink link, const String & id_, ResourceCost reserved_size_, Settings settings_)
+    : MemoryReservation(link, id_, reserved_size_, std::chrono::steady_clock::time_point::max(), settings_)
+{
+}
+
+MemoryReservation::MemoryReservation(
+    ResourceLink link,
+    const String & id_,
+    ResourceCost reserved_size_,
+    std::chrono::steady_clock::time_point admission_deadline_)
+    : MemoryReservation(link, id_, reserved_size_, admission_deadline_, Settings{})
+{
+}
+
+MemoryReservation::MemoryReservation(
+    ResourceLink link,
+    const String & id_,
+    ResourceCost reserved_size_,
+    std::chrono::steady_clock::time_point admission_deadline_,
+    Settings settings_)
     : ResourceAllocation(*link.allocation_queue, id_, settings_.pressure_policy)
     , reserved_size(reserved_size_)
     , settings(settings_)
@@ -60,14 +80,18 @@ MemoryReservation::MemoryReservation(ResourceLink link, const String & id_, Reso
     if (reserved_size > 0)
     {
         bool admitted = false;
+        bool timed_out = false;
         {
             std::unique_lock lock(mutex);
             auto admit_timer = CurrentThread::getProfileEvents().timer(ProfileEvents::MemoryReservationAdmitMicroseconds);
-            cv.wait(lock, [this] { return kill_reason || fail_reason || actual_size <= allocated_size; });
+            auto admitted_pred = [this] { return kill_reason || fail_reason || actual_size <= allocated_size; };
+            // An infinite deadline (`time_point::max()`) means no timeout: wait_until never fires on time
+            // and blocks until the reservation is admitted, killed, or failed.
+            timed_out = !cv.wait_until(lock, admission_deadline_, admitted_pred);
             // Flush deferred profile-event counters before potentially throwing,
             // so failure metrics (e.g. MemoryReservationFailed) are not lost.
             metrics.apply();
-            admitted = !kill_reason && !fail_reason;
+            admitted = !kill_reason && !fail_reason && actual_size <= allocated_size;
         }
 
         if (!admitted)
@@ -75,10 +99,18 @@ MemoryReservation::MemoryReservation(ResourceLink link, const String & id_, Reso
             // `insertAllocation` above linked this object into the scheduler. Throwing straight
             // from the constructor would skip `~MemoryReservation`, so `removeAllocation` would
             // never run and the scheduler would keep a dangling pointer to a destroyed object
-            // (the base `~ResourceAllocation` only has debug-only checks). Unlink first, then
-            // report the failure.
+            // (the base `~ResourceAllocation` only has debug-only checks). Unlink first, then report
+            // the failure.
             detachFromQueue();
             std::unique_lock lock(mutex);
+            // A timeout takes precedence over the generic failure. Cancelling a still-pending
+            // reservation in `detachFromQueue` routes through `AllocationQueue::processActivation`,
+            // which fails it with a generic cancellation error; so when we stopped waiting because the
+            // deadline passed, report that as the admission timeout instead of letting `throwIfNeeded`
+            // surface the cancellation as `MEMORY_RESERVATION_FAILED`.
+            if (timed_out)
+                throw Exception(ErrorCodes::MEMORY_RESERVATION_ACQUISITION_TIMEOUT,
+                    "Timed out waiting to acquire a memory reservation for workload scheduling (exceeded workload_admission_timeout_ms)");
             throwIfNeeded();
         }
     }
@@ -386,4 +418,3 @@ void MemoryReservation::allocationFailed(const std::exception_ptr & reason)
 }
 
 }
-
