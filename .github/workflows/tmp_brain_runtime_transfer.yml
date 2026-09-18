@@ -1,0 +1,29 @@
+name: Temporary Brain runtime transfer
+
+on:
+  push:
+    branches:
+      - tmp/brain-runtime-transfer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download exact experimental runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://github.com/vanchaklar/ClickHouse/releases/download/experimental-time-decay-551da4770f04/clickhouse-time-decay-linux-x86_64-551da4770f04.tar.gz \
+            --output runtime.tar.gz
+          echo 'd019c7923cc12629f98d33d1c5a85627f32e53983fbf7bbb1721ff20616f7b19  runtime.tar.gz' | sha256sum --check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brain-clickhouse-runtime
+          path: runtime.tar.gz
+          retention-days: 1
