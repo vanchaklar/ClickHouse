@@ -16,6 +16,7 @@ concurrency:
 env:
   SOURCE_BASE: 061f4e85dc82d510c05fda398e58945e4d031612
   BUILDER_IMAGE: clickhouse/binary-builder@sha256:965e941101765ee9d6e59f00bd83c268ae97a96c31beb4db8b0c58b8dc8bf570
+  SOURCE_CACHE_KEY: 4d95074e308d0959
 
 jobs:
   build:
@@ -33,13 +34,50 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
           docker system prune --all --force
           df -h
-      - name: Check out source and submodules
+      - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 2
-          submodules: recursive
+          submodules: false
           persist-credentials: false
+      - name: Restore pinned source archive
+        id: source-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build-cache/source/${{ env.SOURCE_CACHE_KEY }}.tar.zst
+          key: expodecay-source-v1-${{ env.SOURCE_CACHE_KEY }}-ce6f5b3471a830d4
+      - name: Verify source cache and materialize pinned submodules
+        timeout-minutes: 15
+        run: |
+          mkdir -p build-cache/source build-release
+          exec >build-release/source-restore.log 2>&1
+          archive="build-cache/source/${SOURCE_CACHE_KEY}.tar.zst"
+          if [ ! -f "${archive}" ]; then
+            curl --fail --silent --show-error --retry 3 --connect-timeout 30 --max-time 600 \
+              "https://clickhouse-builds.s3.amazonaws.com/ci_ch_cache/submodules/${SOURCE_CACHE_KEY}.tar.zst" \
+              --output "${archive}.partial"
+            mv "${archive}.partial" "${archive}"
+          fi
+          python3 .github/scripts/brain-expodecay/restore_submodule_cache.py \
+            --archive "${archive}" \
+            --sha256 ce6f5b3471a830d478f4adf8ad5ece8d41b2ab285634a473810840cd85624321 \
+            --cache-key "${SOURCE_CACHE_KEY}" --repo . \
+            --report build-release/source-cache.json
+          GIT_ALLOW_PROTOCOL= GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+            git -c core.hooksPath=/dev/null -c protocol.allow=never \
+            submodule update --init --no-fetch --jobs 4
+          git -c core.hooksPath=/dev/null submodule status --recursive >build-release/submodules.txt
+          if grep -Eq '^[+-U]' build-release/submodules.txt; then
+            echo "Uninitialized, divergent, or conflicted submodules" >&2
+            exit 1
+          fi
+      - name: Save verified source archive
+        if: matrix.arch == 'x86_64' && steps.source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build-cache/source/${{ env.SOURCE_CACHE_KEY }}.tar.zst
+          key: ${{ steps.source-cache.outputs.cache-primary-key }}
       - name: Restore compiler cache
         id: compiler-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

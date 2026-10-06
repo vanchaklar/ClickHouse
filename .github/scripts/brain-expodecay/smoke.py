@@ -16,7 +16,7 @@ WEIGHT = math.fsum(math.exp((time - 10) / 10) for _, _, time in SAMPLES)
 
 
 def type_literal(width, decay=10):
-    return "'" + f"ExponentialTimeDecaying{width}({decay}, 'compact')".replace("'", "\\'") + "'"
+    return f"'ExponentialTimeDecaying{width}({decay}, compact)'"
 
 
 def close(actual, expected, tolerance=1e-10):

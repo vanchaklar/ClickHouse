@@ -34,7 +34,7 @@ docker pull "${BUILDER_IMAGE}" >build-release/image-pull.log 2>&1
 docker image inspect "${BUILDER_IMAGE}" >build-release/builder-image.json
 docker run --rm \
     --env SCCACHE_DIR=/work/build-cache/sccache \
-    --env SCCACHE_CACHE_SIZE=4G \
+    --env SCCACHE_CACHE_SIZE=3G \
     --env GIT_CONFIG_COUNT=1 \
     --env GIT_CONFIG_KEY_0=safe.directory \
     --env GIT_CONFIG_VALUE_0=/work \
