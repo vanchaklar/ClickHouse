@@ -30,6 +30,7 @@ def digest(path):
 
 def fetch(url, destination):
     # A failed/partial response must never become a release asset.
+    print(f"Downloading pinned artifact: {url}", flush=True)
     partial = destination.with_suffix(destination.suffix + ".partial")
     try:
         subprocess.run([
