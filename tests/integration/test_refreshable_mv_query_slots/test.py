@@ -22,6 +22,13 @@ legacy = cluster.add_instance(
     stay_alive=True,
     keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
 )
+metadata = cluster.add_instance(
+    "metadata",
+    main_configs=["configs/query_slots.xml", "configs/metadata_workload.xml"],
+    with_zookeeper=True,
+    stay_alive=True,
+    keeper_required_feature_flags=["multi_read", "create_if_not_exists"],
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -36,10 +43,11 @@ def started_cluster():
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    for instance in (node, legacy):
+    for instance in (node, legacy, metadata):
         instance.query("DROP DATABASE IF EXISTS rmv_slots SYNC")
         instance.query("DROP TABLE IF EXISTS mv SYNC")
         instance.query("DROP TABLE IF EXISTS queued SYNC")
+        instance.query("DROP TABLE IF EXISTS admission_order SYNC")
         instance.query("DROP WORKLOAD IF EXISTS updated")
         instance.query("DROP WORKLOAD IF EXISTS original")
         instance.query("DROP WORKLOAD IF EXISTS all")
@@ -84,13 +92,13 @@ def create_workload(instance, max_waiting=10):
     )
 
 
-def create_view(instance, name="mv", workload="all", setting="refresh_workload"):
+def create_view(instance, name="mv", workload="all"):
     instance.query(
         f"CREATE MATERIALIZED VIEW {name} REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND "
         "(workload String, x UInt64) ENGINE Memory EMPTY "
         "AS SELECT getSetting('workload') AS workload, toUInt64(1) AS x "
-        f"SETTINGS {setting}='{workload}'",
+        f"SETTINGS workload='{workload}'",
         timeout=30,
     )
 
@@ -125,72 +133,21 @@ def occupied_slot(instance, workload="all"):
 
 def test_default_off_preserves_select_workload():
     create_workload(legacy)
-    create_view(legacy, setting="workload")
     assert legacy.query(
         "SELECT value FROM system.server_settings "
         "WHERE name='use_query_slot_to_refresh_materialized_view'"
     ).strip() == "0"
     with occupied_slot(legacy):
+        create_view(legacy)
         legacy.query("SYSTEM REFRESH VIEW mv")
         legacy.query("SYSTEM WAIT VIEW mv", timeout=30)
         assert legacy.query("SELECT workload, x FROM mv") == "all\t1\n"
         assert metric(legacy, "ConcurrentQueryScheduled") == "0"
 
 
-def test_refresh_workload_with_admission_disabled():
-    create_workload(legacy)
-    with occupied_slot(legacy):
-        assert legacy.query(
-            "SELECT getSetting('workload') SETTINGS refresh_workload='all'", timeout=10
-        ) == "default\n"
-        create_view(legacy)
-        legacy.query("SYSTEM REFRESH VIEW mv")
-        legacy.query("SYSTEM WAIT VIEW mv", timeout=30)
-        assert legacy.query("SELECT workload FROM mv") == "all\n"
-        assert metric(legacy, "ConcurrentQueryScheduled") == "0"
-
-
-@pytest.mark.parametrize("replicated", [False, True])
-def test_refresh_workload_separates_create_from_refresh(replicated):
-    node.query(
-        "CREATE RESOURCE query (QUERY);"
-        "CREATE WORKLOAD all;"
-        "CREATE WORKLOAD original IN all;"
-        "CREATE WORKLOAD updated IN all SETTINGS max_concurrent_queries=1"
-    )
-    engine = (
-        "Replicated('/test/rmv_query_slots/create', 's', 'r')"
-        if replicated else "Atomic"
-    )
-    node.query(f"CREATE DATABASE rmv_slots ENGINE={engine}", timeout=30)
-    with occupied_slot(node, workload="updated"):
-        # Both the outer CREATE and its replicated DDL execution use original. The only
-        # runtime slot is occupied, but creating the view must still complete.
-        node.query(
-            "CREATE MATERIALIZED VIEW rmv_slots.mv REFRESH EVERY 1 YEAR "
-            "SETTINGS refresh_retries=0 APPEND (workload String, x UInt64) ENGINE Memory EMPTY "
-            "AS SELECT workload, toUInt64(1) AS x FROM "
-            "(SELECT getSetting('workload') AS workload SETTINGS workload='original') "
-            "SETTINGS workload='original', refresh_workload='updated'",
-            timeout=30,
-        )
-        definition = node.query("SHOW CREATE TABLE rmv_slots.mv")
-        wait_metric(node, "ConcurrentQueryAcquired", 1)
-        assert metric(node, "ConcurrentQueryScheduled") == "0"
-        node.query("SYSTEM REFRESH VIEW rmv_slots.mv")
-        wait_status(node, "WaitingForResource", database="rmv_slots")
-        assert node.query("SELECT count() FROM rmv_slots.mv") == "0\n"
-    node.query("SYSTEM WAIT VIEW rmv_slots.mv", timeout=30)
-    # Reapplying outer or nested SELECT settings must not restore the CREATE workload.
-    assert node.query("SELECT workload, x FROM rmv_slots.mv") == "updated\t1\n"
-    assert node.query("SHOW CREATE TABLE rmv_slots.mv") == definition
-    wait_metric(node, "ConcurrentQueryAcquired", 0)
-
-
-@pytest.mark.parametrize("setting", ["workload", "refresh_workload"])
-def test_async_admission_uses_select_workload(setting):
+def test_async_admission_uses_select_workload():
     create_workload(node)
-    create_view(node, setting=setting)
+    create_view(node)
     with occupied_slot(node):
         node.query("SYSTEM REFRESH VIEW mv")
         wait_status(node, "WaitingForResource")
@@ -274,7 +231,7 @@ def test_pause_allows_running_refresh_to_finish():
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT sum(sleepEachRow(1)) AS x FROM numbers(10) "
-        "SETTINGS refresh_workload='all', max_threads=1, max_block_size=1"
+        "SETTINGS workload='all', max_threads=1, max_block_size=1"
     )
     node.query("SYSTEM REFRESH VIEW mv")
     # Running also covers the short dispatch window. The process-list entry proves that
@@ -318,7 +275,7 @@ def test_workload_change_while_queued_requires_new_admission():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(1) AS x SETTINGS refresh_workload='updated'"
+            "toUInt64(1) AS x SETTINGS workload='updated'"
         )
     error = node.query_and_get_error("SYSTEM WAIT VIEW mv", timeout=30)
     assert "Refresh workload changed" in error
@@ -337,7 +294,7 @@ def test_select_change_while_queued_uses_fresh_definition():
         wait_status(node, "WaitingForResource")
         node.query(
             "ALTER TABLE mv MODIFY QUERY SELECT getSetting('workload') AS workload, "
-            "toUInt64(2) AS x SETTINGS refresh_workload='all'"
+            "toUInt64(2) AS x SETTINGS workload='all'"
         )
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT workload, x FROM mv") == "all\t2\n"
@@ -430,37 +387,13 @@ def test_cancel_granted_admission_before_execution(operation):
             node.query("SYSTEM DISABLE FAILPOINT refresh_mv_skip_execution")
 
 
-@pytest.mark.parametrize("nested", [False, True])
-def test_refresh_workload_overrides_workload_default(nested):
-    create_workload(node)
-    if nested:
-        select = (
-            "SELECT workload, x FROM "
-            "(SELECT getSetting('workload') AS workload, toUInt64(1) AS x SETTINGS workload=DEFAULT) "
-            "SETTINGS refresh_workload='all'"
-        )
-    else:
-        select = (
-            "SELECT getSetting('workload') AS workload, toUInt64(1) AS x "
-            "SETTINGS workload=DEFAULT, refresh_workload='all'"
-        )
-    node.query(
-        "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
-        "SETTINGS refresh_retries=0 APPEND (workload String, x UInt64) ENGINE Memory EMPTY AS "
-        + select
-    )
-    node.query("SYSTEM REFRESH VIEW mv")
-    node.query("SYSTEM WAIT VIEW mv", timeout=30)
-    assert node.query("SELECT workload, x FROM mv") == "all\t1\n"
-
-
 def test_async_admission_timeout():
     create_workload(node)
     node.query(
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT toUInt64(1) AS x "
-        "SETTINGS refresh_workload='all', workload_admission_timeout_ms=200"
+        "SETTINGS workload='all', workload_admission_timeout_ms=200"
     )
     with occupied_slot(node):
         node.query("SYSTEM REFRESH VIEW mv")
@@ -479,7 +412,7 @@ def test_refresh_uses_memory_reservation_resource():
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT toUInt64(1) AS x "
-        "SETTINGS refresh_workload='all', reserve_memory='1M', workload_admission_timeout_ms=200"
+        "SETTINGS workload='all', reserve_memory='1M', workload_admission_timeout_ms=200"
     )
     node.query("SYSTEM REFRESH VIEW mv")
     error = node.query_and_get_error("SYSTEM WAIT VIEW mv", timeout=30)
@@ -529,7 +462,7 @@ def test_pending_memory_reservation_can_be_cancelled(action):
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 APPEND (x UInt64) ENGINE Memory EMPTY "
         "AS SELECT toUInt64(1) AS x "
-        "SETTINGS refresh_workload='all', reserve_memory='64M', workload_admission_timeout_ms=0"
+        "SETTINGS workload='all', reserve_memory='64M', workload_admission_timeout_ms=0"
     )
 
     with occupied_memory_reservation(node):
@@ -574,7 +507,7 @@ def test_query_slot_released_before_exchange():
     node.query(
         "CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 YEAR "
         "SETTINGS refresh_retries=0 (x UInt64) ENGINE Memory EMPTY "
-        "AS SELECT toUInt64(1) AS x SETTINGS refresh_workload='all'"
+        "AS SELECT toUInt64(1) AS x SETTINGS workload='all'"
     )
     node.query("SYSTEM ENABLE FAILPOINT refresh_mv_pause_before_exchange")
     try:
@@ -591,3 +524,90 @@ def test_query_slot_released_before_exchange():
     node.query("SYSTEM WAIT VIEW mv", timeout=30)
     assert node.query("SELECT x FROM mv") == "1\n"
     wait_metric(node, "ConcurrentQueryAcquired", 0)
+
+
+@pytest.mark.parametrize(
+    "instance", [node, metadata], ids=["metadata_exempt", "metadata_scheduled"]
+)
+@pytest.mark.parametrize("replicated", [False, True], ids=["atomic", "replicated"])
+@pytest.mark.parametrize("append", [False, True], ids=["replace", "append"])
+def test_select_workload_is_independent_of_metadata_admission(instance, replicated, append):
+    instance.query(
+        "CREATE RESOURCE query (QUERY);"
+        "CREATE WORKLOAD all;"
+        "CREATE WORKLOAD original IN all SETTINGS max_concurrent_queries=1;"
+        "CREATE WORKLOAD updated IN all SETTINGS max_concurrent_queries=1"
+    )
+    engine = (
+        f"Replicated('/test/rmv_query_slots/metadata/{instance.name}', 's', 'r')"
+        if replicated
+        else "Atomic"
+    )
+    instance.query(f"CREATE DATABASE rmv_slots ENGINE={engine}")
+    refresh_mode = "APPEND" if append else ""
+    with occupied_slot(instance, workload="updated"):
+        # CREATE, including its replicated DDL, must not acquire the SELECT's full runtime slot.
+        # With metadata scheduling enabled it uses the independent, free metadata workload.
+        instance.query(
+            "CREATE MATERIALIZED VIEW rmv_slots.mv REFRESH EVERY 1 YEAR "
+            f"SETTINGS refresh_retries=0 {refresh_mode} (workload String, x UInt64) ENGINE Memory EMPTY "
+            "AS SELECT getSetting('workload') AS workload, toUInt64(1) AS x "
+            "SETTINGS workload='updated', metadata_workload='original'",
+            settings={"workload_admission_timeout_ms": 1000},
+            timeout=10,
+        )
+        definition = instance.query("SHOW CREATE TABLE rmv_slots.mv")
+        assert metric(instance, "ConcurrentQueryScheduled") == "0"
+        instance.query("SYSTEM REFRESH VIEW rmv_slots.mv")
+        wait_status(instance, "WaitingForResource", database="rmv_slots")
+        assert instance.query("SELECT count() FROM rmv_slots.mv") == "0\n"
+    # Non-APPEND refreshes also create and exchange a temporary table after runtime admission.
+    instance.query("SYSTEM WAIT VIEW rmv_slots.mv", timeout=30)
+    assert instance.query("SELECT workload, x FROM rmv_slots.mv") == "updated\t1\n"
+    assert instance.query("SHOW CREATE TABLE rmv_slots.mv") == definition
+    wait_metric(instance, "ConcurrentQueryAcquired", 0)
+    wait_metric(instance, "ConcurrentQueryScheduled", 0)
+
+
+@pytest.mark.parametrize("scheduler", ["fair", "las", "priority"])
+def test_async_admission_query_aware_scheduler(scheduler):
+    node.query("CREATE RESOURCE query (QUERY)")
+    node.query(
+        "CREATE WORKLOAD all SETTINGS max_concurrent_queries=1, "
+        f"scheduler='{scheduler}'"
+    )
+    create_view(node)
+    with occupied_slot(node):
+        node.query("SYSTEM REFRESH VIEW mv")
+        wait_status(node, "WaitingForResource")
+        assert metric(node, "ConcurrentQueryScheduled") == "1"
+    node.query("SYSTEM WAIT VIEW mv", timeout=30)
+    assert node.query("SELECT workload, x FROM mv") == "all\t1\n"
+    wait_metric(node, "ConcurrentQueryAcquired", 0)
+    wait_metric(node, "ConcurrentQueryScheduled", 0)
+
+
+def test_async_admission_preserves_query_priority():
+    node.query(
+        "CREATE RESOURCE query (QUERY);"
+        "CREATE WORKLOAD all SETTINGS max_concurrent_queries=1, scheduler='priority';"
+        "CREATE TABLE admission_order (priority Int64, started DateTime64(9)) ENGINE Memory"
+    )
+    for name, priority in (("mv", 1), ("queued", -1)):
+        node.query(
+            f"CREATE MATERIALIZED VIEW {name} REFRESH EVERY 1 YEAR "
+            "SETTINGS refresh_retries=0 APPEND TO admission_order EMPTY "
+            f"AS SELECT toInt64({priority}) AS priority, now64(9) AS started "
+            f"SETTINGS workload='all', workload_priority={priority}"
+        )
+    with occupied_slot(node):
+        # Queue low priority first: observing both waits excludes immediate-admission ordering.
+        for name in ("mv", "queued"):
+            node.query(f"SYSTEM REFRESH VIEW {name}")
+            wait_status(node, "WaitingForResource", view=name)
+        assert metric(node, "ConcurrentQueryScheduled") == "2"
+    for name in ("mv", "queued"):
+        node.query(f"SYSTEM WAIT VIEW {name}", timeout=30)
+    assert node.query("SELECT priority FROM admission_order ORDER BY started") == "-1\n1\n"
+    wait_metric(node, "ConcurrentQueryAcquired", 0)
+    wait_metric(node, "ConcurrentQueryScheduled", 0)

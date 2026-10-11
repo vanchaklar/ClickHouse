@@ -3461,19 +3461,21 @@ This only works well when refresh coordination is enabled, i.e. the views are in
 
 ### Workload Scheduling {#refresh-workload-scheduling}
 
-Use `refresh_workload` in the stored SELECT settings to choose the workload for refresh admission and execution:
+Use the normal `workload` setting in the stored `SELECT` to choose the workload for refresh admission and execution:
 
 ```sql
 CREATE MATERIALIZED VIEW mv REFRESH EVERY 1 MINUTE
 ENGINE = MergeTree ORDER BY tuple()
-AS SELECT * FROM source SETTINGS refresh_workload = 'refreshes';
+AS SELECT * FROM source SETTINGS workload = 'refreshes';
 ```
 
-`refresh_workload` takes effect only for the refresh. The ordinary `workload` setting still applies to the CREATE or ALTER query. When both are present, `refresh_workload` overrides `workload` throughout refresh execution, including nested SELECT settings and internal operations. The stored query definition is unchanged. An empty `refresh_workload` preserves the existing `workload` behavior.
+Admission uses the same `workload` as refresh execution. Metadata-only `CREATE` and `ALTER` statements follow `use_metadata_workload`: they are exempt from workload scheduling by default, or use `metadata_workload` when it is enabled. This keeps creation independent of the refresh workload, including when a replicated view uses a workload with only one query slot.
 
 When the server setting `use_query_slot_to_refresh_materialized_view` is enabled and a `QUERY` resource is configured for the effective refresh workload, the refresh requests a query slot before starting execution. Admission and execution use the same workload. A queued refresh reports `WaitingForResource` in `system.view_refreshes` without occupying a background execution worker. Stopping, pausing or dropping the view cancels pending admission.
 
-The server setting is disabled by default to preserve existing scheduling behavior. With it disabled, or without a `QUERY` resource for the workload, refreshes do not wait for a query slot. Workload classification for CPU and I/O is independent of this setting.
+When enabled, the server setting also applies initial memory-reservation admission when a `MEMORY RESERVATION` resource and a nonzero `reserve_memory` are configured, even without a `QUERY` resource. This memory wait can be cancelled by stopping, pausing or dropping the view. `workload_admission_timeout_ms` bounds the combined query-slot and initial memory-reservation wait.
+
+The server setting is disabled by default to preserve existing scheduling behavior. With it disabled, refreshes bypass query-slot and initial memory-reservation admission. Without a `QUERY` resource for the workload, refreshes do not wait for a query slot. Workload classification for CPU and I/O is independent of this setting.
 
 ### Refresh Settings {#refresh-settings}
 
