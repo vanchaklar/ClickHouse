@@ -1,8 +1,9 @@
 name: Package pinned ExpoDecay CI artifacts
 
 on:
+  create:
   push:
-    branches: [release/package-expodecay-cf2fd6eb-20261011]
+    branches: [release/package-expodecay-cf2fd6eb-20261011-run]
     paths:
       - .github/workflows/package-expodecay.yml
       - .github/scripts/expodecay-package.py
@@ -18,7 +19,7 @@ concurrency:
 
 jobs:
   package-and-publish:
-    if: github.repository == 'vanchaklar/ClickHouse' && github.ref == 'refs/heads/release/package-expodecay-cf2fd6eb-20261011'
+    if: github.repository == 'vanchaklar/ClickHouse' && github.ref == 'refs/heads/release/package-expodecay-cf2fd6eb-20261011-run'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
