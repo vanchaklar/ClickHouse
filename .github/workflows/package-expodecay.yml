@@ -1,0 +1,41 @@
+name: Package pinned ExpoDecay CI artifacts
+
+on:
+  push:
+    branches: [release/package-expodecay-cf2fd6eb-20261011]
+    paths:
+      - .github/workflows/package-expodecay.yml
+      - .github/scripts/expodecay-package.py
+      - .github/scripts/expodecay-publish.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-expodecay-cf2fd6eb-20261011
+  cancel-in-progress: false
+
+jobs:
+  package-and-publish:
+    if: github.repository == 'vanchaklar/ClickHouse' && github.ref == 'refs/heads/release/package-expodecay-cf2fd6eb-20261011'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/scripts/expodecay-package.py
+            /.github/scripts/expodecay-publish.py
+            /LICENSE
+          fetch-depth: 1
+      - name: Download pinned builds and verify compression round-trip
+        run: python3 .github/scripts/expodecay-package.py
+      - name: Publish experimental release after all assets pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/expodecay-publish.py
