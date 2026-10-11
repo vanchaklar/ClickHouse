@@ -82,87 +82,82 @@ def compress(binary, archive, license_file):
             raise ValueError("Incomplete archive")
 
 
+def extract_executable(package, destination):
+    found = False
+    process = subprocess.Popen(["dpkg-deb", "--fsys-tarfile", str(package)], stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as tar:
+            for member in tar:
+                if member.name.removeprefix("./") != "usr/bin/clickhouse":
+                    continue
+                if found or not member.isfile():
+                    raise ValueError("Expected one regular clickhouse executable")
+                with destination.open("wb") as output:
+                    shutil.copyfileobj(tar.extractfile(member), output)
+                found = True
+        if process.wait() != 0 or not found:
+            raise ValueError("Debian executable extraction failed")
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+
+
 def main():
-    # Fresh output only; reruns run on a clean runner and cannot mix stale files.
     OUT.mkdir(parents=True, exist_ok=False)
     WORK.mkdir(parents=True, exist_ok=False)
-    artifacts = []
-    for arch, deb_arch, family, machine, binary_job, package_job in BUILDS:
-        name = f"clickhouse-expodecay-{VERSION}-linux-{arch}-{HEAD[:12]}"
-        url = f"{BASE}/build_{family}_binary/clickhouse"
-        binary = WORK / name
-        fetch(url, binary)
-        validate_elf(binary, machine)
-        archive = OUT / (name + ".tar.gz")
-        compress(binary, archive, Path("LICENSE"))
-        raw_sha = digest(binary)
-        (OUT / (name + ".raw.sha256")).write_text(f"{raw_sha}  clickhouse\n")
-        (OUT / (name + ".tar.gz.sha256")).write_text(f"{digest(archive)}  {archive.name}\n")
-        artifacts.append(dict(name=archive.name, kind="standalone", architecture=arch,
-                              source_url=url, upstream_job=f"{RUN}/job/{binary_job}",
-                              raw_size=binary.stat().st_size, raw_sha256=raw_sha,
-                              size=archive.stat().st_size, sha256=digest(archive),
-                              compression_round_trip="passed"))
-        binary.unlink()
-        for package in ("clickhouse-common-static", "clickhouse-client", "clickhouse-server"):
-            package_name = f"{package}_{VERSION}_{deb_arch}.deb"
-            url = f"{BASE}/build_{family}_release/{package_name}"
-            destination = OUT / package_name
-            fetch(url, destination)
-            with destination.open("rb") as source:
+    assets, extracted = [], []
+    for arch, deb_arch, family, machine, _, release_job in BUILDS:
+        common = None
+        for package in ("clickhouse-common-static",):
+            name = f"{package}_{VERSION}_{deb_arch}.deb"
+            target = WORK / name
+            url = f"{BASE}/build_{family}_release/{name}"
+            fetch(url, target)
+            with target.open("rb") as source:
                 if source.read(8) != b"!<arch>\n":
-                    raise ValueError(f"Invalid Debian archive: {package_name}")
-            # Read package metadata only; no install scripts or binaries run.
-            info = subprocess.check_output([
-                "dpkg-deb", "--show", "--showformat=${Package}\t${Version}\t${Architecture}",
-                str(destination),
-            ], text=True).strip()
-            if info != f"{package}\t{VERSION}\t{deb_arch}":
-                raise ValueError(f"Unexpected Debian metadata: {info}")
-            artifacts.append(dict(name=package_name, kind="deb", architecture=deb_arch,
-                                  source_url=url, upstream_job=f"{RUN}/job/{package_job}",
-                                  size=destination.stat().st_size, sha256=digest(destination)))
-    provenance = dict(
-        upstream_repository="ClickHouse/ClickHouse", upstream_pr=110934,
-        upstream_head=HEAD, compiled_merge=MERGE, upstream_run=RUN,
-        reported_version=VERSION, reported_revision=54515,
-        version_evidence="upstream successful CI logs; binaries not executed here",
-        packaging_commit=os.environ["GITHUB_SHA"],
-        packaging_run=f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
-        checksum_scope="Generated integrity hashes; no independent upstream raw-binary SHA-256 was available. Not an independent source/binary attestation.",
-        artifacts=artifacts,
-    )
+                    raise ValueError("Not a Debian archive")
+            metadata = subprocess.check_output([
+                "dpkg-deb", "--show", "--showformat=${Package} ${Version} ${Architecture}", str(target)
+            ], text=True)
+            if metadata != f"{package} {VERSION} {deb_arch}":
+                raise ValueError(f"Unexpected Debian metadata: {metadata}")
+            assets.append(dict(name=name, size=target.stat().st_size, sha256=digest(target),
+                               source_url=url, build_variant=f"{family}_release", job_id=release_job))
+            if package == "clickhouse-common-static":
+                common = target
+        binary = WORK / f"clickhouse-{arch}"
+        extract_executable(common, binary)
+        validate_elf(binary, machine)
+        archive = OUT / f"clickhouse-expodecay-{VERSION}-linux-{arch}-release-{HEAD[:12]}.tar.gz"
+        compress(binary, archive, Path("LICENSE"))
+        record = dict(architecture=arch, source_package=common.name, source_package_sha256=digest(common),
+                      member="usr/bin/clickhouse", raw_size=binary.stat().st_size, raw_sha256=digest(binary),
+                      compressed_size=archive.stat().st_size, build_variant=f"{family}_release")
+        record["archive"] = archive.name
+        (OUT / (archive.name + ".sha256")).write_text(f"{digest(archive)}  {archive.name}\n")
+        (OUT / (archive.name + ".raw.sha256")).write_text(f"{digest(binary)}  clickhouse\n")
+        extracted.append(record)
+    provenance = dict(upstream_head=HEAD, compiled_merge=MERGE, version=VERSION, upstream_run=RUN,
+                      version_evidence="Upstream build logs and Debian metadata; executable not run",
+                      packaging_commit=os.environ.get("GITHUB_SHA"),
+                      packaging_run=os.environ.get("GITHUB_RUN_ID"), assets=assets, extracted=extracted)
     (OUT / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    (OUT / "README.txt").write_text(
+        f"Experimental ExpoDecay ClickHouse {VERSION}\nSource: {HEAD}\nCompiled merge: {MERGE}\n"
+        "Standalone archives from matching amd_release/arm_release builds. Archives "
+        "contain only the executable extracted from common-static Debian packages and its license. Input packages are not included.\n"
+        "No downloaded executable was run. Brain compatibility is untested. ARM64 is Linux, not native Android/Bionic.\n"
+        "SHA256SUMS are generated integrity evidence, not an independent upstream attestation.\n")
     shutil.copyfile("LICENSE", OUT / "LICENSE")
-    lines = [f"{digest(path)}  {path.name}" for path in sorted(OUT.iterdir())]
-    (OUT / "SHA256SUMS").write_text("\n".join(lines) + "\n")
-    notes = f"""Experimental ExpoDecay CI artifacts — {VERSION}
-
-Repackaged from successful upstream PR https://github.com/ClickHouse/ClickHouse/pull/110934 builds.
-PR head: `{HEAD}`. Actual compiled merge: `{MERGE}`.
-Upstream run: {RUN}. Exact job URLs and original artifact URLs are in `PROVENANCE.json`.
-Release tag points to PR source head; packaging commit is `{os.environ['GITHUB_SHA']}`.
-
-Primary assets: gzip-compressed standalone Linux x86_64 and ARM64 binaries.
-Each archive contains `clickhouse` and `LICENSE`; compression round-trip checked byte-for-byte by SHA-256 and size.
-The ARM64 build is Linux/glibc software, suitable for evaluating in Debian/PRoot; it is NOT a native Android/Bionic build. PRoot compatibility is not tested here.
-Matching client, server and common-static Debian packages are included unchanged from the same compiled revision's release builds. They are different build variants from the standalone binary jobs.
-RPM, debug-symbol, Keeper, macOS and other distributions are omitted from this focused release.
-
-`SHA256SUMS` checks release assets; `.raw.sha256` checks `clickhouse` after extraction, and `.tar.gz.sha256` checks the corresponding compressed archive.
-These are generated integrity hashes, NOT independently verified upstream checksums or proof of reproducible compilation. No independent upstream raw-binary SHA-256 was found.
-Version {VERSION}, revision 54515 comes from upstream CI logs. Packaging does not execute binaries, test Brain compatibility, or establish production readiness.
-This is an unofficial experimental prerelease, not an official stable ClickHouse release.
-
-| Asset | Bytes |
-| --- | ---: |
-"""
-    notes += "\n".join(f"| `{p.name}` | {p.stat().st_size} |" for p in sorted(OUT.iterdir())) + "\n"
-    Path("tmp/expodecay-release-notes.txt").write_text(notes)
-    if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-            summary.write(notes)
+    (OUT / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in sorted(OUT.iterdir())))
+    summary = "\n".join(f"- `{p.name}`: {p.stat().st_size:,} bytes" for p in sorted(OUT.iterdir()))
     print(json.dumps(provenance, indent=2), flush=True)
+    print(summary, flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+            output.write("## Verified packages\n" + summary + "\n")
 
 
 if __name__ == "__main__":

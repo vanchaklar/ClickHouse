@@ -1,4 +1,4 @@
-"""Publish only the complete verified asset set; preserve existing releases."""
+"""Upload verified assets only to an existing owner-published prerelease."""
 import hashlib
 import json
 import os
@@ -14,9 +14,9 @@ OUT = Path("tmp/expodecay-release")
 TITLE = "Experimental ExpoDecay 26.10.1.1 — cf2fd6eb11d6"
 
 
-def get_release():
+def get_resource(resource):
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}",
+        f"https://api.github.com/repos/{REPO}/{resource}",
         headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
                  "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"},
     )
@@ -40,18 +40,24 @@ def main():
     provenance = json.loads((OUT / "PROVENANCE.json").read_text())
     if provenance["upstream_head"] != HEAD:
         raise ValueError("Wrong artifact revision")
-    release = get_release()
+    release = get_resource(f"releases/tags/{TAG}")
     if release is None:
-        gh("create", TAG, "--target", HEAD, "--title", TITLE, "--prerelease", "--draft",
-           "--notes-file", "tmp/expodecay-release-notes.txt")
-        release = get_release()
-    if not release or not release["draft"] or release["name"] != TITLE:
-        raise ValueError("Refusing to overwrite an existing published or unrelated release")
-    # Recover a partially uploaded draft only when existing assets match exactly.
+        print("Owner-created release is not present; verified Actions artifact retained.", flush=True)
+        return
+    if release["draft"] or not release["prerelease"]:
+        raise ValueError("Expected an owner-published prerelease")
+    ref = get_resource(f"git/ref/tags/{TAG}")
+    if not ref:
+        raise ValueError("Release tag missing")
+    obj = ref["object"]
+    for _ in range(5):
+        if obj["type"] != "tag":
+            break
+        obj = get_resource(f"git/tags/{obj['sha']}")["object"]
+    if obj["type"] != "commit" or obj["sha"] != HEAD:
+        raise ValueError("Release tag does not resolve to the pinned source")
     existing = {asset["name"]: asset for asset in release["assets"]}
     paths = sorted(OUT.iterdir())
-    if set(existing) - {p.name for p in paths}:
-        raise ValueError("Draft has unexpected assets; refusing to replace them")
     for path in paths:
         with path.open("rb") as source:
             checksum = "sha256:" + hashlib.file_digest(source, "sha256").hexdigest()
@@ -61,19 +67,14 @@ def main():
                 raise ValueError(f"Draft asset differs: {path.name}")
         else:
             gh("upload", TAG, str(path))
-    actual = {asset["name"]: asset for asset in get_release()["assets"]}
-    if set(actual) != {path.name for path in paths}:
+    actual = {asset["name"]: asset for asset in get_resource(f"releases/tags/{TAG}")["assets"]}
+    if not {path.name for path in paths}.issubset(actual):
         raise ValueError("Release asset inventory differs")
     for path in paths:
         with path.open("rb") as source:
             checksum = "sha256:" + hashlib.file_digest(source, "sha256").hexdigest()
         if actual[path.name].get("digest") != checksum or actual[path.name]["size"] != path.stat().st_size:
             raise ValueError(f"Uploaded asset integrity differs: {path.name}")
-    gh("edit", TAG, "--draft=false", "--prerelease", "--latest=false",
-       "--notes-file", "tmp/expodecay-release-notes.txt")
-    release = get_release()
-    if release["draft"] or not release["prerelease"]:
-        raise ValueError("Release was not published as a prerelease")
     print(release["html_url"], flush=True)
 
 
