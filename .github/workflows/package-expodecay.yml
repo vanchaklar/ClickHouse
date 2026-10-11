@@ -22,6 +22,8 @@ jobs:
     if: github.repository == 'vanchaklar/ClickHouse' && github.ref == 'refs/heads/release/package-expodecay-cf2fd6eb-20261011-run'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      PYTHONUNBUFFERED: '1'
     permissions:
       contents: write
     steps:
